@@ -32,6 +32,7 @@ const (
 	ToolReactionsRemove             = "reactions_remove"
 	ToolAttachmentGetData           = "attachment_get_data"
 	ToolConversationsSearchMessages = "conversations_search_messages"
+	ToolConversationsMark           = "conversations_mark"
 	ToolChannelsList                = "channels_list"
 )
 
@@ -43,6 +44,7 @@ var ValidToolNames = []string{
 	ToolReactionsRemove,
 	ToolAttachmentGetData,
 	ToolConversationsSearchMessages,
+	ToolConversationsMark,
 	ToolChannelsList,
 }
 
@@ -167,6 +169,33 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'."),
 			),
 		), conversationsHandler.ConversationsAddMessageHandler)
+	}
+
+	if shouldAddTool(ToolConversationsMark, enabledTools, "SLACK_MCP_MARK_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsMark,
+			mcp.WithDescription("Mark one or more conversations (channels, DMs, or groups) as read up to a specific message timestamp. Accepts a list of channel/timestamp pairs to mark in bulk."),
+			mcp.WithTitleAnnotation("Mark Conversations as Read"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithArray("channels",
+				mcp.Required(),
+				mcp.Description("List of channels to mark as read. Each item must have 'channel_id' and 'timestamp'."),
+				mcp.Items(map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"channel_id": map[string]any{
+							"type":        "string",
+							"description": "ID of the channel (Cxxxxxxxxxx) or name (#channel or @user).",
+						},
+						"timestamp": map[string]any{
+							"type":        "string",
+							"description": "Timestamp of the last read message, in format 1234567890.123456.",
+						},
+					},
+					"required": []string{"channel_id", "timestamp"},
+				}),
+				mcp.MinItems(1),
+			),
+		), conversationsHandler.ConversationsMarkHandler)
 	}
 
 	if shouldAddTool(ToolReactionsAdd, enabledTools, "SLACK_MCP_REACTION_TOOL") {

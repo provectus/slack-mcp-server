@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -103,6 +104,13 @@ type addReactionParams struct {
 
 type filesGetParams struct {
 	fileID string
+}
+
+type conversationsMarkParams struct {
+	Channels []struct {
+		ChannelID string `json:"channel_id"`
+		Timestamp string `json:"timestamp"`
+	} `json:"channels"`
 }
 
 type usersSearchParams struct {
@@ -265,6 +273,66 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 
 	messages := ch.convertMessagesFromHistory(history.Messages, historyParams.ChannelID, false)
 	return marshalMessagesToCSV(messages)
+}
+
+// ConversationsMarkHandler marks one or more conversations as read
+func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsMarkHandler called", zap.Any("params", request.Params))
+
+	if ready, err := ch.apiProvider.IsReady(); !ready {
+		ch.logger.Error("API provider not ready", zap.Error(err))
+		return nil, err
+	}
+
+	args := request.GetArguments()
+	rawChannels, ok := args["channels"]
+	if !ok {
+		return nil, errors.New("channels is required")
+	}
+
+	jsonBytes, err := json.Marshal(rawChannels)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal channels argument: %w", err)
+	}
+
+	var params conversationsMarkParams
+	if err := json.Unmarshal(jsonBytes, &params.Channels); err != nil {
+		return nil, fmt.Errorf("failed to parse channels argument: %w", err)
+	}
+
+	if len(params.Channels) == 0 {
+		return nil, errors.New("channels must contain at least one entry")
+	}
+
+	var results []string
+	for _, entry := range params.Channels {
+		if entry.ChannelID == "" {
+			results = append(results, fmt.Sprintf("SKIP: missing channel_id"))
+			continue
+		}
+		if !strings.Contains(entry.Timestamp, ".") {
+			results = append(results, fmt.Sprintf("SKIP %s: invalid timestamp %q (must be in format 1234567890.123456)", entry.ChannelID, entry.Timestamp))
+			continue
+		}
+
+		channelID, err := ch.resolveChannelID(ctx, entry.ChannelID)
+		if err != nil {
+			ch.logger.Error("Failed to resolve channel", zap.String("channel", entry.ChannelID), zap.Error(err))
+			results = append(results, fmt.Sprintf("FAIL %s: %v", entry.ChannelID, err))
+			continue
+		}
+
+		err = ch.apiProvider.Slack().MarkConversationContext(ctx, channelID, entry.Timestamp)
+		if err != nil {
+			ch.logger.Error("MarkConversationContext failed", zap.String("channel", channelID), zap.String("timestamp", entry.Timestamp), zap.Error(err))
+			results = append(results, fmt.Sprintf("FAIL %s: %v", entry.ChannelID, err))
+			continue
+		}
+
+		results = append(results, fmt.Sprintf("OK %s: marked as read up to %s", entry.ChannelID, entry.Timestamp))
+	}
+
+	return mcp.NewToolResultText(strings.Join(results, "\n")), nil
 }
 
 // ReactionsAddHandler adds an emoji reaction to a message
