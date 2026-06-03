@@ -28,7 +28,9 @@ token (`xoxc`/`xoxd`). It does **not** work with bot tokens (`xoxb`).
 - Editing, listing, or deleting existing drafts.
 - Scheduled messages (`chat.scheduleMessage`) — explicitly rejected during
   brainstorming; that auto-sends and is a different feature.
-- File attachments in drafts.
+- File attachments in drafts (see "Attachments & link previews").
+- Resolving `@username` mentions inside the message body (see "@username &
+  mention resolution").
 
 ## Input surface
 
@@ -131,6 +133,66 @@ unset.
 - `xoxc`/`xoxd` (session): tool registered and functional.
 - `xoxb`/`xoxp` (bot/OAuth): tool **not registered** (edge client unavailable), same
   as the search tool. No partial/broken behavior.
+
+## @username & mention resolution
+
+Two distinct cases, **both inherited unchanged from `conversations_add_message`** —
+v1 adds no new resolution logic:
+
+1. **Destination** (`channel_id = "@username"`): handled by `resolveChannelID`. It
+   looks `@username` up in the channels cache `ChannelsInv` map, which maps DM
+   display-names (`@user`) to that user's DM channel ID. On a cache miss it forces a
+   single `ForceRefreshChannels` and retries once; a still-missing name or a
+   rate-limited refresh returns an error. Result: the draft is created in that user's
+   DM. The `@username` must correspond to an existing DM the cache knows about.
+
+2. **Mentions inside the message body**: **not resolved.** The `text` is passed
+   verbatim to `slackGoUtil.ConvertMarkdownTextToBlocks`. A literal `@username` in the
+   body stays plain text — it does **not** become a real Slack `<@U…>` mention. The
+   handler's `paramFormatUser` helper (which converts `@username` → `<@U…>`) is used
+   **only for building search filters**, never for message bodies, so it does not
+   apply here. To produce a genuine mention, the caller must supply Slack's mention
+   syntax, exactly as with `add_message`.
+
+This parity is intentional: the draft body should render identically to what
+`add_message` would post for the same `text`.
+
+## Attachments & link previews
+
+- **Attachments / files: not supported in v1.** The `drafts.create` payload has a
+  `file_ids` field, but the tool always sends it empty. File upload is a non-goal and
+  a possible future extension.
+- **Link previews (unfurling): not controllable at draft time.** Unfurling is a
+  *send-time* behaviour. `add_message` sets unfurl options on `PostMessage`, but this
+  tool never posts — it only stores blocks as a draft. When the user later sends the
+  draft from the Slack client, unfurling follows their normal Slack/workspace
+  behaviour. Consequently `SLACK_MCP_ADD_MESSAGE_UNFURLING` does **not** apply to
+  drafts, and the tool stores/encodes no unfurl preference. This will be documented
+  explicitly to avoid confusion.
+
+## Documentation updates
+
+Update all relevant tracked `*.md` docs so the new tool and env var are discoverable
+and consistent with the existing tools:
+
+- **`README.md`**:
+  - Add a new numbered tool subsection (after `conversations_mark`, §8) describing
+    `conversations_draft_message`, its params, the session-token-only requirement,
+    and the `SLACK_MCP_DRAFT_MESSAGE_TOOL` guard.
+  - Add `SLACK_MCP_DRAFT_MESSAGE_TOOL` to the Environment Variables (Quick Reference)
+    table.
+  - Add a Features bullet noting safe native drafting (no auto-send).
+- **`docs/03-configuration-and-usage.md`**:
+  - Add `conversations_draft_message` to the `--enabled-tools` available-tools list.
+  - Add `SLACK_MCP_DRAFT_MESSAGE_TOOL` to the Environment Variables table.
+  - Add the tool to the "Write tools" enablement explanation and an example config.
+  - Note the session-token (`xoxc`/`xoxd`) requirement and that drafts never
+    auto-send.
+- Confirm no other tracked `*.md` (e.g. `docs/01`, `docs/02`, `pkg/provider/README.md`)
+  needs changes; update only if they enumerate tools/env vars.
+
+Note: `SLACK_TOKENS_SETUP.md` is an **untracked local file**, not part of the repo —
+out of scope for committed doc updates.
 
 ## Testing
 
