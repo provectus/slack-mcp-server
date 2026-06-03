@@ -163,6 +163,7 @@ type SlackAPI interface {
 	// Edge API methods
 	ClientUserBoot(ctx context.Context) (*edge.ClientUserBootResponse, error)
 	UsersSearch(ctx context.Context, query string, count int) ([]slack.User, error)
+	DraftsCreate(ctx context.Context, channelID, threadTs string, blocks json.RawMessage) (string, error)
 }
 
 type MCPSlackClient struct {
@@ -391,6 +392,10 @@ func (c *MCPSlackClient) ClientUserBoot(ctx context.Context) (*edge.ClientUserBo
 
 func (c *MCPSlackClient) UsersSearch(ctx context.Context, query string, count int) ([]slack.User, error) {
 	return c.edgeClient.UsersSearch(ctx, query, count)
+}
+
+func (c *MCPSlackClient) DraftsCreate(ctx context.Context, channelID, threadTs string, blocks json.RawMessage) (string, error) {
+	return c.edgeClient.DraftsCreate(ctx, channelID, threadTs, blocks)
 }
 
 func (c *MCPSlackClient) IsEnterprise() bool {
