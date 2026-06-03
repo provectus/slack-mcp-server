@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"runtime/trace"
 
 	"github.com/google/uuid"
@@ -86,5 +87,11 @@ func (cl *Client) DraftsCreate(ctx context.Context, channelID, threadTs string, 
 	if err := r.validate("drafts.create"); err != nil {
 		return "", err
 	}
-	return r.draftID(), nil
+	id := r.draftID()
+	if id == "" {
+		// ok:true but no id in either known field indicates the response shape
+		// has changed; surface it instead of returning an empty confirmation.
+		return "", fmt.Errorf("drafts.create: draft created but response contained no draft id (unexpected payload shape)")
+	}
+	return id, nil
 }

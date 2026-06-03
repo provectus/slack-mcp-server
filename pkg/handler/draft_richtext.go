@@ -49,48 +49,29 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	prevSelfBreaking := false
 
 	for n := doc.FirstChild(); n != nil; n = n.NextSibling() {
-		var el slack.RichTextElement
+		var els []slack.RichTextElement
 		selfBreaking := false
 
 		switch n.Kind() {
 		case ast.KindParagraph:
-			el = &slack.RichTextSection{
+			els = []slack.RichTextElement{&slack.RichTextSection{
 				Type:     slack.RTESection,
 				Elements: parseDraftInline(n, source, false),
-			}
+			}}
 
 		case ast.KindHeading:
-			el = &slack.RichTextSection{
+			els = []slack.RichTextElement{&slack.RichTextSection{
 				Type:     slack.RTESection,
 				Elements: parseDraftInline(n, source, true),
-			}
+			}}
 
 		case ast.KindList:
 			selfBreaking = true
-			list := n.(*ast.List)
-			var items []slack.RichTextElement
-			for li := n.FirstChild(); li != nil; li = li.NextSibling() {
-				if li.Kind() != ast.KindListItem {
-					continue
-				}
-				items = append(items, &slack.RichTextSection{
-					Type:     slack.RTESection,
-					Elements: parseDraftInline(li.FirstChild(), source, false),
-				})
-			}
-			style := slack.RTEListBullet
-			if list.IsOrdered() {
-				style = slack.RTEListOrdered
-			}
-			el = &slack.RichTextList{
-				Type:     slack.RTEList,
-				Style:    style,
-				Elements: items,
-			}
+			els = buildRichTextLists(n.(*ast.List), source, 0)
 
 		case ast.KindFencedCodeBlock, ast.KindCodeBlock:
 			selfBreaking = true
-			el = &slack.RichTextPreformatted{
+			els = []slack.RichTextElement{&slack.RichTextPreformatted{
 				RichTextSection: slack.RichTextSection{
 					Type: slack.RTEPreformatted,
 					Elements: []slack.RichTextSectionElement{
@@ -100,14 +81,14 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 						},
 					},
 				},
-			}
+			}}
 
 		case ast.KindBlockquote:
 			selfBreaking = true
-			el = &slack.RichTextQuote{
+			els = []slack.RichTextElement{&slack.RichTextQuote{
 				Type:     slack.RTEQuote,
 				Elements: parseDraftInline(n, source, false),
-			}
+			}}
 
 		default:
 			// Unknown top-level block: best-effort text extraction so content is
@@ -116,10 +97,10 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			if len(inline) == 0 {
 				continue
 			}
-			el = &slack.RichTextSection{Type: slack.RTESection, Elements: inline}
+			els = []slack.RichTextElement{&slack.RichTextSection{Type: slack.RTESection, Elements: inline}}
 		}
 
-		if el == nil {
+		if len(els) == 0 {
 			continue
 		}
 		// Separate top-level blocks so they render as distinct paragraphs. A blank
@@ -133,7 +114,7 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			}
 			elements = append(elements, newlineSection(sep))
 		}
-		elements = append(elements, el)
+		elements = append(elements, els...)
 		prevSelfBreaking = selfBreaking
 	}
 
@@ -152,6 +133,68 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 		Type:     slack.MBTRichText,
 		Elements: elements,
 	}, nil
+}
+
+// buildRichTextLists converts a markdown list (and any nested lists) into one
+// or more rich_text_list elements. Nested lists become separate rich_text_list
+// elements with an increased Indent, emitted in document order so no list
+// content is dropped. Loose list items (multiple block children) are joined with
+// newlines within the item's section.
+func buildRichTextLists(list *ast.List, source []byte, indent int) []slack.RichTextElement {
+	style := slack.RTEListBullet
+	if list.IsOrdered() {
+		style = slack.RTEListOrdered
+	}
+
+	var out []slack.RichTextElement
+	var items []slack.RichTextElement
+	flush := func() {
+		if len(items) > 0 {
+			out = append(out, &slack.RichTextList{
+				Type:     slack.RTEList,
+				Style:    style,
+				Indent:   indent,
+				Elements: items,
+			})
+			items = nil
+		}
+	}
+
+	for li := list.FirstChild(); li != nil; li = li.NextSibling() {
+		if li.Kind() != ast.KindListItem {
+			continue
+		}
+
+		var inline []slack.RichTextSectionElement
+		var nested []*ast.List
+		for c := li.FirstChild(); c != nil; c = c.NextSibling() {
+			if c.Kind() == ast.KindList {
+				nested = append(nested, c.(*ast.List))
+				continue
+			}
+			sub := parseDraftInline(c, source, false)
+			if len(sub) == 0 {
+				continue
+			}
+			if len(inline) > 0 {
+				inline = append(inline, &slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: "\n"})
+			}
+			inline = append(inline, sub...)
+		}
+
+		items = append(items, &slack.RichTextSection{Type: slack.RTESection, Elements: inline})
+
+		// Emit nested lists right after their parent item, splitting this list so
+		// nesting renders in document order.
+		if len(nested) > 0 {
+			flush()
+			for _, nl := range nested {
+				out = append(out, buildRichTextLists(nl, source, indent+1)...)
+			}
+		}
+	}
+	flush()
+	return out
 }
 
 // newlineSection is a rich_text_section containing only newline(s), used to

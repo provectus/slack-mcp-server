@@ -136,6 +136,28 @@ func TestMarkdownToRichTextBlock_SingleBreakAfterList(t *testing.T) {
 	}
 }
 
+func TestMarkdownToRichTextBlock_NestedAndLooseLists(t *testing.T) {
+	input := "- parent item\n  - nested child item\n\n1. first paragraph\n\n   second paragraph\n2. second item"
+	rtb, err := markdownToRichTextBlock(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// No content may be dropped (nested child + loose second paragraph).
+	if missing := draftContentLoss(input, rtb); len(missing) > 0 {
+		t.Fatalf("nested/loose list content was dropped: %v", missing)
+	}
+	// The nested bullet must produce an indented rich_text_list.
+	var maxIndent int
+	for _, el := range rtb.Elements {
+		if l, ok := el.(*slack.RichTextList); ok && l.Indent > maxIndent {
+			maxIndent = l.Indent
+		}
+	}
+	if maxIndent < 1 {
+		t.Errorf("expected a nested list with indent >= 1, got max indent %d", maxIndent)
+	}
+}
+
 func TestDraftContentLoss_PassesForFullInput(t *testing.T) {
 	input := ":provectus: **AWOS v1.3.1** — [release notes](https://example.com/x) — done.\n\n" +
 		"1. **Testing** first-class. (#109)\n2. Screenshots to `docs/screenshots/`.\n\n" +

@@ -30,6 +30,34 @@ func TestBuildDraftDestinations(t *testing.T) {
 	})
 }
 
+func TestDraftsCreateResponseDraftID(t *testing.T) {
+	topLevel := draftsCreateResponse{DraftID: "Dr1"}
+
+	nested := draftsCreateResponse{}
+	nested.Draft.ID = "Dr2"
+
+	both := draftsCreateResponse{DraftID: "Dr1"}
+	both.Draft.ID = "Dr2"
+
+	cases := []struct {
+		name string
+		resp draftsCreateResponse
+		want string
+	}{
+		{"top-level draft_id", topLevel, "Dr1"},
+		{"nested draft.id", nested, "Dr2"},
+		{"top-level wins", both, "Dr1"},
+		{"both empty", draftsCreateResponse{}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.resp.draftID(); got != tc.want {
+				t.Errorf("draftID() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestDraftsCreateFormValues(t *testing.T) {
 	form := draftsCreateForm{
 		BaseRequest:     BaseRequest{Token: "xoxc-test"},
