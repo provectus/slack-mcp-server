@@ -44,9 +44,13 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	doc := draftMD.Parser().Parse(gmtext.NewReader(source))
 
 	var elements []slack.RichTextElement
+	// Whether the previously appended block is "self-breaking" (lists, quotes and
+	// preformatted blocks render block-level and emit their own trailing newline).
+	prevSelfBreaking := false
 
 	for n := doc.FirstChild(); n != nil; n = n.NextSibling() {
 		var el slack.RichTextElement
+		selfBreaking := false
 
 		switch n.Kind() {
 		case ast.KindParagraph:
@@ -62,6 +66,7 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			}
 
 		case ast.KindList:
+			selfBreaking = true
 			list := n.(*ast.List)
 			var items []slack.RichTextElement
 			for li := n.FirstChild(); li != nil; li = li.NextSibling() {
@@ -84,6 +89,7 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			}
 
 		case ast.KindFencedCodeBlock, ast.KindCodeBlock:
+			selfBreaking = true
 			el = &slack.RichTextPreformatted{
 				RichTextSection: slack.RichTextSection{
 					Type: slack.RTEPreformatted,
@@ -97,6 +103,7 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			}
 
 		case ast.KindBlockquote:
+			selfBreaking = true
 			el = &slack.RichTextQuote{
 				Type:     slack.RTEQuote,
 				Elements: parseDraftInline(n, source, false),
@@ -115,12 +122,19 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 		if el == nil {
 			continue
 		}
-		// Separate every top-level block with a blank line so paragraphs, lists
-		// and quotes do not glue together in the composer.
+		// Separate top-level blocks so they render as distinct paragraphs. A blank
+		// line ("\n\n") is needed between inline sections, but after a self-breaking
+		// block (list/quote/code), which already emits a trailing newline, a single
+		// "\n" is enough to avoid a double blank line.
 		if len(elements) > 0 {
-			elements = append(elements, newlineSection())
+			sep := "\n\n"
+			if prevSelfBreaking {
+				sep = "\n"
+			}
+			elements = append(elements, newlineSection(sep))
 		}
 		elements = append(elements, el)
+		prevSelfBreaking = selfBreaking
 	}
 
 	// Never return an empty block: fall back to the raw text as one section so
@@ -140,13 +154,13 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	}, nil
 }
 
-// newlineSection is a rich_text_section containing a single newline, used to
+// newlineSection is a rich_text_section containing only newline(s), used to
 // separate top-level blocks so they are not glued together in the composer.
-func newlineSection() *slack.RichTextSection {
+func newlineSection(text string) *slack.RichTextSection {
 	return &slack.RichTextSection{
 		Type: slack.RTESection,
 		Elements: []slack.RichTextSectionElement{
-			&slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: "\n"},
+			&slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: text},
 		},
 	}
 }

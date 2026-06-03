@@ -104,8 +104,35 @@ func TestMarkdownToRichTextBlock_SeparatesParagraphAndList(t *testing.T) {
 	if !ok || len(prev.Elements) != 1 {
 		t.Fatalf("expected a separator section before the list, got %T", rtb.Elements[listIdx-1])
 	}
-	if te, ok := prev.Elements[0].(*slack.RichTextSectionTextElement); !ok || te.Text != "\n" {
-		t.Fatalf("expected newline separator before list, got %+v", prev.Elements[0])
+	// Paragraph precedes the list (a non-self-breaking block), so a blank-line
+	// separator ("\n\n") is needed to render an empty line before the list.
+	if te, ok := prev.Elements[0].(*slack.RichTextSectionTextElement); !ok || te.Text != "\n\n" {
+		t.Fatalf("expected blank-line separator before list, got %+v", prev.Elements[0])
+	}
+}
+
+func TestMarkdownToRichTextBlock_SingleBreakAfterList(t *testing.T) {
+	// list -> paragraph: the list already emits a trailing newline, so the
+	// separator must be a single "\n" to avoid a double blank line.
+	rtb, err := markdownToRichTextBlock("1. one\n2. two\n\nAfter the list.")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	listIdx := -1
+	for i, el := range rtb.Elements {
+		if _, ok := el.(*slack.RichTextList); ok {
+			listIdx = i
+		}
+	}
+	if listIdx < 0 || listIdx+1 >= len(rtb.Elements) {
+		t.Fatalf("expected a list followed by more elements, list index=%d", listIdx)
+	}
+	sep, ok := rtb.Elements[listIdx+1].(*slack.RichTextSection)
+	if !ok || len(sep.Elements) != 1 {
+		t.Fatalf("expected a separator section after the list, got %T", rtb.Elements[listIdx+1])
+	}
+	if te, ok := sep.Elements[0].(*slack.RichTextSectionTextElement); !ok || te.Text != "\n" {
+		t.Fatalf("expected single-newline separator after list, got %+v", sep.Elements[0])
 	}
 }
 
