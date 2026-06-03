@@ -91,6 +91,7 @@ func TestValidToolNames(t *testing.T) {
 			ToolAttachmentGetData:           true,
 			ToolConversationsSearchMessages: true,
 			ToolConversationsMark:           true,
+			ToolConversationsDraftMessage:   true,
 			ToolChannelsList:                true,
 		}
 
@@ -110,6 +111,7 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "attachment_get_data", ToolAttachmentGetData)
 		assert.Equal(t, "conversations_search_messages", ToolConversationsSearchMessages)
 		assert.Equal(t, "conversations_mark", ToolConversationsMark)
+		assert.Equal(t, "conversations_draft_message", ToolConversationsDraftMessage)
 		assert.Equal(t, "channels_list", ToolChannelsList)
 	})
 }
