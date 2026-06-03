@@ -304,27 +304,26 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		return nil, err
 	}
 
-	var blocks []slack.Block
+	// drafts.create (the Slack message composer) only accepts rich_text blocks;
+	// it silently drops section/header blocks. So, unlike conversations_add_message,
+	// the draft body must be a single rich_text block.
+	var richText *slack.RichTextBlock
 	switch params.contentType {
 	case "text/plain":
-		blocks = []slack.Block{
-			slack.NewSectionBlock(slack.NewTextBlockObject(slack.PlainTextType, params.text, false, false), nil, nil),
-		}
+		richText = plainRichTextBlock(params.text)
 	case "text/markdown":
-		converted, convErr := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
+		converted, convErr := markdownToRichTextBlock(params.text)
 		if convErr != nil {
 			ch.logger.Warn("Markdown parsing error, falling back to plain text", zap.Error(convErr))
-			blocks = []slack.Block{
-				slack.NewSectionBlock(slack.NewTextBlockObject(slack.PlainTextType, params.text, false, false), nil, nil),
-			}
+			richText = plainRichTextBlock(params.text)
 		} else {
-			blocks = converted
+			richText = converted
 		}
 	default:
 		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
 	}
 
-	blocksJSON, err := json.Marshal(blocks)
+	blocksJSON, err := json.Marshal([]slack.Block{richText})
 	if err != nil {
 		ch.logger.Error("Failed to marshal blocks", zap.Error(err))
 		return nil, err
