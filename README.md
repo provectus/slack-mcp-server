@@ -15,6 +15,7 @@ This feature-rich Slack MCP Server has:
 - **Smart History**: Fetch messages with pagination by date (d1, 7d, 1m) or message count.
 - **Search Messages**: Search messages in channels, threads, and DMs using various filters like date, user, and content.
 - **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions.
+- **Native Drafts**: The `conversations_draft_message` tool creates Slack drafts (saved to your Drafts, never auto-sent). Disabled by default; enable via `SLACK_MCP_DRAFT_MESSAGE_TOOL`. Requires a session token (`xoxc`/`xoxd`).
 - **DM and Group DM support**: Retrieve direct messages and group direct messages.
 - **Embedded user information**: Embed user information in messages, for better context.
 - **Cache support**: Cache users and channels for faster access.
@@ -114,7 +115,20 @@ Mark one or more conversations (channels, DMs, or groups) as read up to a specif
     - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
     - `timestamp` (string, required): Timestamp of the last read message, in format `1234567890.123456`.
 
-### 9. users_search:
+### 9. conversations_draft_message:
+
+Creates a native Slack **draft** in a channel, DM, or thread. The draft appears in the user's Slack "Drafts" list and is **never sent automatically** — the user reviews and sends it from Slack.
+
+| Argument       | Type   | Required | Description                                                                 |
+|----------------|--------|----------|-----------------------------------------------------------------------------|
+| `channel_id`   | string | Yes      | `Cxxxxxxxxxx`, `#channel`, or `@username_dm`.                               |
+| `thread_ts`    | string | No       | Thread parent timestamp `1234567890.123456`. If set, draft is a reply.      |
+| `text`         | string | Yes      | Message text in `content_type` format.                                      |
+| `content_type` | string | No       | `text/markdown` (default) or `text/plain`.                                  |
+
+> **Note:** Drafting is disabled by default. Enable it via `SLACK_MCP_DRAFT_MESSAGE_TOOL` (`true`, `1`, a comma-separated channel allowlist, or `!Cxxxx` negation), or by listing `conversations_draft_message` in `SLACK_MCP_ENABLED_TOOLS`. This tool uses Slack's edge API and requires a **session token (`xoxc`/`xoxd`)** — it is not registered for bot tokens. `@username` in `channel_id` resolves to that user's DM; `@username` inside `text` is not converted to a mention.
+
+### 10. users_search:
 Search for users by name, email, or display name. Returns user details and DM channel ID if available.
 
 > **Note:** For OAuth tokens (`xoxp`/`xoxb`), this tool searches the local users cache using pattern matching. For browser session tokens (`xoxc`/`xoxd`), it uses the Slack edge API for real-time search.
@@ -184,6 +198,7 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_SERVER_CA_TOOLKIT`     | No        | `nil`                     | Inject HTTPToolkit CA certificate to root trust-store for MitM debugging                                                                                                                                                                                                                  |
 | `SLACK_MCP_SERVER_CA_INSECURE`    | No        | `false`                   | Trust all insecure requests (NOT RECOMMENDED)                                                                                                                                                                                                                                             |
 | `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Enable message posting via `conversations_add_message` by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
+| `SLACK_MCP_DRAFT_MESSAGE_TOOL`    | No        | `nil`                     | Enable native draft creation via `conversations_draft_message` by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist, or `!` before a channel ID to allow all except those. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. Requires a session token (`xoxc`/`xoxd`); ignored for bot tokens. |
 | `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `nil`                     | When `conversations_add_message` is enabled (via `SLACK_MCP_ADD_MESSAGE_TOOL` or `SLACK_MCP_ENABLED_TOOLS`), setting this to `true` will automatically mark sent messages as read.                                                                                                        |
 | `SLACK_MCP_MARK_TOOL`             | No        | `nil`                     | Enable `conversations_mark` tool by setting it to `true`, `1`, or `yes`. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`.                                                                                                                       |
 | `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `nil`                     | Enable to let Slack unfurl posted links or set comma-separated list of domains e.g. `github.com,slack.com` to whitelist unfurling only for them. If text contains whitelisted and unknown domain unfurling will be disabled for security reasons.                                         |
