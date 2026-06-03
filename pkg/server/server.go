@@ -33,6 +33,7 @@ const (
 	ToolAttachmentGetData           = "attachment_get_data"
 	ToolConversationsSearchMessages = "conversations_search_messages"
 	ToolConversationsMark           = "conversations_mark"
+	ToolConversationsDraftMessage   = "conversations_draft_message"
 	ToolChannelsList                = "channels_list"
 )
 
@@ -45,6 +46,7 @@ var ValidToolNames = []string{
 	ToolAttachmentGetData,
 	ToolConversationsSearchMessages,
 	ToolConversationsMark,
+	ToolConversationsDraftMessage,
 	ToolChannelsList,
 }
 
@@ -196,6 +198,29 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.MinItems(1),
 			),
 		), conversationsHandler.ConversationsMarkHandler)
+	}
+
+	// Drafts use the undocumented edge API, which needs a session token (xoxc/xoxd).
+	// Bot tokens cannot reach it, so only register for non-bot tokens.
+	if !provider.IsBotToken() && shouldAddTool(ToolConversationsDraftMessage, enabledTools, "SLACK_MCP_DRAFT_MESSAGE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsDraftMessage,
+			mcp.WithDescription("Create a native Slack draft message in a channel, DM, or thread. The draft is saved to the user's Drafts and is NOT sent automatically. Requires a session token (xoxc/xoxd); not available with bot tokens."),
+			mcp.WithTitleAnnotation("Draft Message"),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithString("thread_ts",
+				mcp.Description("Unique identifier of a thread's parent message in format 1234567890.123456. Optional; if provided the draft is a threaded reply, otherwise it targets the channel itself."),
+			),
+			mcp.WithString("text",
+				mcp.Description("Message text in specified content_type format. Example: 'Hello, world!' for text/plain or '# Hello, world!' for text/markdown."),
+			),
+			mcp.WithString("content_type",
+				mcp.DefaultString("text/markdown"),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'."),
+			),
+		), conversationsHandler.ConversationsDraftMessageHandler)
 	}
 
 	if shouldAddTool(ToolReactionsAdd, enabledTools, "SLACK_MCP_REACTION_TOOL") {
