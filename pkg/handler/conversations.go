@@ -316,6 +316,12 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		if convErr != nil {
 			ch.logger.Warn("Markdown parsing error, falling back to plain text", zap.Error(convErr))
 			richText = plainRichTextBlock(params.text)
+		} else if missing := draftContentLoss(params.text, converted); len(missing) > 0 {
+			// Refuse to create a draft that would silently drop content; surface
+			// the gap to the caller instead of producing a lossy draft.
+			ch.logger.Error("Draft conversion dropped content",
+				zap.Strings("missing_words", missing))
+			return nil, fmt.Errorf("conversations_draft_message: refusing to create draft because markdown conversion dropped content (missing words: %s). Please report this input", strings.Join(missing, ", "))
 		} else {
 			richText = converted
 		}

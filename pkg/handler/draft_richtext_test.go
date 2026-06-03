@@ -84,6 +84,63 @@ func TestMarkdownToRichTextBlock_PreservesAllContent(t *testing.T) {
 	}
 }
 
+func TestMarkdownToRichTextBlock_SeparatesParagraphAndList(t *testing.T) {
+	rtb, err := markdownToRichTextBlock("Intro paragraph.\n\n1. first item\n2. second item")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Find the list and assert the element right before it is a newline separator,
+	// so the paragraph does not glue onto the list.
+	listIdx := -1
+	for i, el := range rtb.Elements {
+		if _, ok := el.(*slack.RichTextList); ok {
+			listIdx = i
+		}
+	}
+	if listIdx <= 0 {
+		t.Fatalf("expected a list preceded by other elements, list index=%d", listIdx)
+	}
+	prev, ok := rtb.Elements[listIdx-1].(*slack.RichTextSection)
+	if !ok || len(prev.Elements) != 1 {
+		t.Fatalf("expected a separator section before the list, got %T", rtb.Elements[listIdx-1])
+	}
+	if te, ok := prev.Elements[0].(*slack.RichTextSectionTextElement); !ok || te.Text != "\n" {
+		t.Fatalf("expected newline separator before list, got %+v", prev.Elements[0])
+	}
+}
+
+func TestDraftContentLoss_PassesForFullInput(t *testing.T) {
+	input := ":provectus: **AWOS v1.3.1** — [release notes](https://example.com/x) — done.\n\n" +
+		"1. **Testing** first-class. (#109)\n2. Screenshots to `docs/screenshots/`.\n\n" +
+		":pray: Thanks **Aleksandr Makarov**."
+	rtb, err := markdownToRichTextBlock(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if missing := draftContentLoss(input, rtb); len(missing) > 0 {
+		t.Fatalf("expected no content loss, but these words were missing: %v", missing)
+	}
+}
+
+func TestDraftContentLoss_DetectsMissingWord(t *testing.T) {
+	// A rich_text block that is missing the word "gamma" from the input.
+	rtb := &slack.RichTextBlock{
+		Type: slack.MBTRichText,
+		Elements: []slack.RichTextElement{
+			&slack.RichTextSection{
+				Type: slack.RTESection,
+				Elements: []slack.RichTextSectionElement{
+					&slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: "alpha beta"},
+				},
+			},
+		},
+	}
+	missing := draftContentLoss("alpha beta gamma", rtb)
+	if len(missing) != 1 || missing[0] != "gamma" {
+		t.Fatalf("expected [gamma], got %v", missing)
+	}
+}
+
 func TestMarkdownToRichTextBlock_BoldAndLinkStyles(t *testing.T) {
 	rtb, err := markdownToRichTextBlock("Hello **bold** and [link](https://example.com).")
 	if err != nil {

@@ -1,6 +1,10 @@
 package handler
 
 import (
+	"sort"
+	"strings"
+	"unicode"
+
 	"github.com/slack-go/slack"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
@@ -42,20 +46,20 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	var elements []slack.RichTextElement
 
 	for n := doc.FirstChild(); n != nil; n = n.NextSibling() {
+		var el slack.RichTextElement
+
 		switch n.Kind() {
 		case ast.KindParagraph:
-			elements = appendBlankLine(elements)
-			elements = append(elements, &slack.RichTextSection{
+			el = &slack.RichTextSection{
 				Type:     slack.RTESection,
 				Elements: parseDraftInline(n, source, false),
-			})
+			}
 
 		case ast.KindHeading:
-			elements = appendBlankLine(elements)
-			elements = append(elements, &slack.RichTextSection{
+			el = &slack.RichTextSection{
 				Type:     slack.RTESection,
 				Elements: parseDraftInline(n, source, true),
-			})
+			}
 
 		case ast.KindList:
 			list := n.(*ast.List)
@@ -73,14 +77,14 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			if list.IsOrdered() {
 				style = slack.RTEListOrdered
 			}
-			elements = append(elements, &slack.RichTextList{
+			el = &slack.RichTextList{
 				Type:     slack.RTEList,
 				Style:    style,
 				Elements: items,
-			})
+			}
 
 		case ast.KindFencedCodeBlock, ast.KindCodeBlock:
-			elements = append(elements, &slack.RichTextPreformatted{
+			el = &slack.RichTextPreformatted{
 				RichTextSection: slack.RichTextSection{
 					Type: slack.RTEPreformatted,
 					Elements: []slack.RichTextSectionElement{
@@ -90,14 +94,33 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 						},
 					},
 				},
-			})
+			}
 
 		case ast.KindBlockquote:
-			elements = append(elements, &slack.RichTextQuote{
+			el = &slack.RichTextQuote{
 				Type:     slack.RTEQuote,
 				Elements: parseDraftInline(n, source, false),
-			})
+			}
+
+		default:
+			// Unknown top-level block: best-effort text extraction so content is
+			// never silently dropped. draftContentLoss is the hard backstop.
+			inline := parseDraftInline(n, source, false)
+			if len(inline) == 0 {
+				continue
+			}
+			el = &slack.RichTextSection{Type: slack.RTESection, Elements: inline}
 		}
+
+		if el == nil {
+			continue
+		}
+		// Separate every top-level block with a blank line so paragraphs, lists
+		// and quotes do not glue together in the composer.
+		if len(elements) > 0 {
+			elements = append(elements, newlineSection())
+		}
+		elements = append(elements, el)
 	}
 
 	// Never return an empty block: fall back to the raw text as one section so
@@ -117,18 +140,15 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	}, nil
 }
 
-// appendBlankLine inserts a newline-only section between top-level paragraphs so
-// they are visually separated in the composer, mirroring blank lines in markdown.
-func appendBlankLine(elements []slack.RichTextElement) []slack.RichTextElement {
-	if len(elements) == 0 {
-		return elements
-	}
-	return append(elements, &slack.RichTextSection{
+// newlineSection is a rich_text_section containing a single newline, used to
+// separate top-level blocks so they are not glued together in the composer.
+func newlineSection() *slack.RichTextSection {
+	return &slack.RichTextSection{
 		Type: slack.RTESection,
 		Elements: []slack.RichTextSectionElement{
 			&slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: "\n"},
 		},
-	})
+	}
 }
 
 // codeBlockText extracts the raw text of a (fenced) code block.
@@ -241,4 +261,104 @@ func draftTextStyle(isBold, isItalic bool) *slack.RichTextSectionTextStyle {
 		Bold:   isBold,
 		Italic: isItalic,
 	}
+}
+
+// draftContentLoss reports any visible-text words from the markdown input that
+// did not make it into the generated rich_text block. It is the backstop that
+// lets the draft handler refuse to create a draft that would silently drop
+// content, rather than producing a lossy draft. List markers and formatting
+// syntax are ignored (they are not text); link labels and URLs are both checked.
+func draftContentLoss(input string, rtb *slack.RichTextBlock) []string {
+	want := tokenizeWords(collectMarkdownText(input))
+	got := tokenizeWords(flattenRichTextContent(rtb))
+
+	var missing []string
+	for word, n := range want {
+		if got[word] < n {
+			missing = append(missing, word)
+		}
+	}
+	sort.Strings(missing)
+	return missing
+}
+
+// collectMarkdownText walks the markdown AST and returns every piece of visible
+// text plus link/autolink URLs, ignoring list markers and emphasis/heading
+// syntax (which are not text nodes).
+func collectMarkdownText(input string) string {
+	source := []byte(input)
+	doc := draftMD.Parser().Parse(gmtext.NewReader(source))
+
+	var sb strings.Builder
+	_ = ast.Walk(doc, func(n ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch n.Kind() {
+		case ast.KindText:
+			seg := n.(*ast.Text).Segment
+			sb.Write(seg.Value(source))
+			sb.WriteByte(' ')
+		case ast.KindString:
+			sb.Write(n.(*ast.String).Value)
+			sb.WriteByte(' ')
+		case ast.KindAutoLink:
+			sb.Write(n.(*ast.AutoLink).URL(source))
+			sb.WriteByte(' ')
+		case ast.KindLink:
+			// Label text is collected via the child Text nodes; add the URL here.
+			sb.WriteString(string(n.(*ast.Link).Destination))
+			sb.WriteByte(' ')
+		}
+		return ast.WalkContinue, nil
+	})
+	return sb.String()
+}
+
+// flattenRichTextContent returns all visible text in a rich_text block, including
+// link labels and their URLs, across sections, lists, quotes and preformatted.
+func flattenRichTextContent(rtb *slack.RichTextBlock) string {
+	var sb strings.Builder
+	writeSection := func(elems []slack.RichTextSectionElement) {
+		for _, e := range elems {
+			switch el := e.(type) {
+			case *slack.RichTextSectionTextElement:
+				sb.WriteString(el.Text)
+				sb.WriteByte(' ')
+			case *slack.RichTextSectionLinkElement:
+				sb.WriteString(el.Text)
+				sb.WriteByte(' ')
+				sb.WriteString(el.URL)
+				sb.WriteByte(' ')
+			}
+		}
+	}
+	for _, el := range rtb.Elements {
+		switch e := el.(type) {
+		case *slack.RichTextSection:
+			writeSection(e.Elements)
+		case *slack.RichTextList:
+			for _, item := range e.Elements {
+				if s, ok := item.(*slack.RichTextSection); ok {
+					writeSection(s.Elements)
+				}
+			}
+		case *slack.RichTextQuote:
+			writeSection(e.Elements)
+		case *slack.RichTextPreformatted:
+			writeSection(e.Elements)
+		}
+	}
+	return sb.String()
+}
+
+// tokenizeWords splits text into a multiset of lowercase alphanumeric words.
+func tokenizeWords(s string) map[string]int {
+	counts := make(map[string]int)
+	for _, field := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	}) {
+		counts[field]++
+	}
+	return counts
 }
