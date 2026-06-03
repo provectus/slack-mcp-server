@@ -96,6 +96,13 @@ type addMessageParams struct {
 	contentType string
 }
 
+type draftMessageParams struct {
+	channel     string
+	threadTs    string
+	text        string
+	contentType string
+}
+
 type addReactionParams struct {
 	channel   string
 	timestamp string
@@ -273,6 +280,76 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 
 	messages := ch.convertMessagesFromHistory(history.Messages, historyParams.ChannelID, false)
 	return marshalMessagesToCSV(messages)
+}
+
+// draftResult is the CSV confirmation row returned after creating a draft.
+type draftResult struct {
+	DraftID  string `csv:"draft_id"`
+	Channel  string `csv:"channel_id"`
+	ThreadTS string `csv:"thread_ts"`
+}
+
+// ConversationsDraftMessageHandler creates a native Slack draft and returns a CSV confirmation.
+func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ConversationsDraftMessageHandler called", zap.Any("params", request.Params))
+
+	if ready, err := ch.apiProvider.IsReady(); !ready {
+		ch.logger.Error("API provider not ready", zap.Error(err))
+		return nil, err
+	}
+
+	params, err := ch.parseParamsToolDraftMessage(ctx, request)
+	if err != nil {
+		ch.logger.Error("Failed to parse draft-message params", zap.Error(err))
+		return nil, err
+	}
+
+	var blocks []slack.Block
+	switch params.contentType {
+	case "text/plain":
+		blocks = []slack.Block{
+			slack.NewSectionBlock(slack.NewTextBlockObject(slack.PlainTextType, params.text, false, false), nil, nil),
+		}
+	case "text/markdown":
+		converted, convErr := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
+		if convErr != nil {
+			ch.logger.Warn("Markdown parsing error, falling back to plain text", zap.Error(convErr))
+			blocks = []slack.Block{
+				slack.NewSectionBlock(slack.NewTextBlockObject(slack.PlainTextType, params.text, false, false), nil, nil),
+			}
+		} else {
+			blocks = converted
+		}
+	default:
+		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
+	}
+
+	blocksJSON, err := json.Marshal(blocks)
+	if err != nil {
+		ch.logger.Error("Failed to marshal blocks", zap.Error(err))
+		return nil, err
+	}
+
+	ch.logger.Debug("Creating Slack draft",
+		zap.String("channel", params.channel),
+		zap.String("thread_ts", params.threadTs),
+		zap.String("content_type", params.contentType),
+	)
+	draftID, err := ch.apiProvider.Slack().DraftsCreate(ctx, params.channel, params.threadTs, blocksJSON)
+	if err != nil {
+		ch.logger.Error("Slack DraftsCreate failed", zap.Error(err))
+		return nil, err
+	}
+
+	csvBytes, err := gocsv.MarshalBytes(&[]draftResult{{
+		DraftID:  draftID,
+		Channel:  params.channel,
+		ThreadTS: params.threadTs,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	return mcp.NewToolResultText(string(csvBytes)), nil
 }
 
 // ConversationsMarkHandler marks one or more conversations as read
@@ -692,6 +769,10 @@ func isChannelAllowed(channel string) bool {
 	return isChannelAllowedForConfig(channel, os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL"))
 }
 
+func isDraftChannelAllowed(channel string) bool {
+	return isChannelAllowedForConfig(channel, os.Getenv("SLACK_MCP_DRAFT_MESSAGE_TOOL"))
+}
+
 func (ch *ConversationsHandler) resolveChannelID(ctx context.Context, channel string) (string, error) {
 	if !strings.HasPrefix(channel, "#") && !strings.HasPrefix(channel, "@") {
 		return channel, nil
@@ -988,6 +1069,64 @@ func (ch *ConversationsHandler) parseParamsToolAddMessage(ctx context.Context, r
 	}
 
 	return &addMessageParams{
+		channel:     channel,
+		threadTs:    threadTs,
+		text:        msgText,
+		contentType: contentType,
+	}, nil
+}
+
+func (ch *ConversationsHandler) parseParamsToolDraftMessage(ctx context.Context, request mcp.CallToolRequest) (*draftMessageParams, error) {
+	toolConfig := os.Getenv("SLACK_MCP_DRAFT_MESSAGE_TOOL")
+	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
+
+	if toolConfig == "" {
+		if !strings.Contains(enabledTools, "conversations_draft_message") {
+			ch.logger.Error("Draft-message tool disabled by default")
+			return nil, errors.New(
+				"by default, the conversations_draft_message tool is disabled. " +
+					"To enable it, set the SLACK_MCP_DRAFT_MESSAGE_TOOL environment variable to true, 1, or a comma separated list of channels " +
+					"to limit where the MCP can create drafts, e.g. 'SLACK_MCP_DRAFT_MESSAGE_TOOL=C1234567890,D0987654321', 'SLACK_MCP_DRAFT_MESSAGE_TOOL=!C1234567890' " +
+					"to enable all except one or 'SLACK_MCP_DRAFT_MESSAGE_TOOL=true' for all channels and DMs",
+			)
+		}
+		toolConfig = "true"
+	}
+
+	channel := request.GetString("channel_id", "")
+	if channel == "" {
+		ch.logger.Error("channel_id missing in draft-message params")
+		return nil, errors.New("channel_id must be a string")
+	}
+	channel, err := ch.resolveChannelID(ctx, channel)
+	if err != nil {
+		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
+		return nil, err
+	}
+	if !isDraftChannelAllowed(channel) {
+		ch.logger.Warn("Draft-message tool not allowed for channel", zap.String("channel", channel), zap.String("policy", toolConfig))
+		return nil, fmt.Errorf("conversations_draft_message tool is not allowed for channel %q, applied policy: %s", channel, toolConfig)
+	}
+
+	threadTs := request.GetString("thread_ts", "")
+	if threadTs != "" && !strings.Contains(threadTs, ".") {
+		ch.logger.Error("Invalid thread_ts format", zap.String("thread_ts", threadTs))
+		return nil, errors.New("thread_ts must be a valid timestamp in format 1234567890.123456")
+	}
+
+	msgText := request.GetString("text", "")
+	if msgText == "" {
+		ch.logger.Error("Message text missing")
+		return nil, errors.New("text must be a string")
+	}
+
+	contentType := request.GetString("content_type", "text/markdown")
+	if contentType != "text/plain" && contentType != "text/markdown" {
+		ch.logger.Error("Invalid content_type", zap.String("content_type", contentType))
+		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
+	}
+
+	return &draftMessageParams{
 		channel:     channel,
 		threadTs:    threadTs,
 		text:        msgText,

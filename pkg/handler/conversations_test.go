@@ -633,6 +633,24 @@ func TestUnitIsChannelAllowedForConfig(t *testing.T) {
 	}
 }
 
+func TestUnitIsDraftChannelAllowed(t *testing.T) {
+	t.Run("allowed when env unset-as-true", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_DRAFT_MESSAGE_TOOL", "true")
+		if !isDraftChannelAllowed("C123") {
+			t.Fatal("expected C123 to be allowed with =true")
+		}
+	})
+	t.Run("restricted to listed channel", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_DRAFT_MESSAGE_TOOL", "C123")
+		if !isDraftChannelAllowed("C123") {
+			t.Fatal("expected listed channel C123 to be allowed")
+		}
+		if isDraftChannelAllowed("C999") {
+			t.Fatal("expected unlisted channel C999 to be denied")
+		}
+	})
+}
+
 func TestUnitIsSlackUserIDPrefix(t *testing.T) {
 	tests := []struct {
 		name string
