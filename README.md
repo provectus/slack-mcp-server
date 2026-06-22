@@ -15,7 +15,7 @@ This feature-rich Slack MCP Server has:
 - **Smart History**: Fetch messages with pagination by date (d1, 7d, 1m) or message count.
 - **Search Messages**: Search messages in channels, threads, and DMs using various filters like date, user, and content.
 - **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions.
-- **Native Drafts**: The `conversations_draft_message` tool creates Slack drafts (saved to your Drafts, never auto-sent). Disabled by default; enable via `SLACK_MCP_DRAFT_MESSAGE_TOOL`. Requires a session token (`xoxc`/`xoxd`).
+- **Native Drafts**: The `conversations_draft_message` tool creates or replaces Slack drafts (saved to your Drafts, never auto-sent). Re-running it for the same channel/thread updates the existing draft in place rather than piling up duplicates. Disabled by default; enable via `SLACK_MCP_DRAFT_MESSAGE_TOOL`. Requires a session token (`xoxc`/`xoxd`).
 - **DM and Group DM support**: Retrieve direct messages and group direct messages.
 - **Embedded user information**: Embed user information in messages, for better context.
 - **Cache support**: Cache users and channels for faster access.
@@ -117,7 +117,7 @@ Mark one or more conversations (channels, DMs, or groups) as read up to a specif
 
 ### 9. conversations_draft_message:
 
-Creates a native Slack **draft** in a channel, DM, or thread. The draft appears in the user's Slack "Drafts" list and is **never sent automatically** — the user reviews and sends it from Slack.
+Creates or replaces a native Slack **draft** in a channel, DM, or thread. The draft appears in the user's Slack "Drafts" list and is **never sent automatically** — the user reviews and sends it from Slack.
 
 | Argument       | Type   | Required | Description                                                                 |
 |----------------|--------|----------|-----------------------------------------------------------------------------|
@@ -125,6 +125,8 @@ Creates a native Slack **draft** in a channel, DM, or thread. The draft appears 
 | `thread_ts`    | string | No       | Thread parent timestamp `1234567890.123456`. If set, draft is a reply.      |
 | `text`         | string | Yes      | Message text in `content_type` format.                                      |
 | `content_type` | string | No       | `text/markdown` (default) or `text/plain`.                                  |
+
+> **Upsert by destination:** there is only ever one draft per channel/thread. If a draft already exists for the target `channel_id` (and `thread_ts`), this tool **replaces it in place** instead of creating a duplicate — so re-running it to edit a draft updates the existing one. A new draft is created only when none exists. Drafts that have already been sent, deleted, or scheduled are left untouched.
 
 > **Note:** Drafting is disabled by default. Enable it via `SLACK_MCP_DRAFT_MESSAGE_TOOL` (`true`, `1`, a comma-separated channel allowlist, or `!Cxxxx` negation), or by listing `conversations_draft_message` in `SLACK_MCP_ENABLED_TOOLS`. This tool uses Slack's edge API and requires a **session token (`xoxc`/`xoxd`)** — it is not registered for bot (`xoxb`) or OAuth user (`xoxp`) tokens. `@username` in `channel_id` resolves to that user's DM; `@username` inside `text` is not converted to a mention.
 
