@@ -205,7 +205,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 	// only register for non-OAuth (session) tokens.
 	if !provider.IsOAuth() && shouldAddTool(ToolConversationsDraftMessage, enabledTools, "SLACK_MCP_DRAFT_MESSAGE_TOOL") {
 		s.AddTool(mcp.NewTool(ToolConversationsDraftMessage,
-			mcp.WithDescription("Create a native Slack draft message in a channel, DM, or thread. The draft is saved to the user's Drafts and is NOT sent automatically. Requires a session token (xoxc/xoxd); not available with bot or OAuth (xoxp) tokens."),
+			mcp.WithDescription("Create or replace a native Slack draft message in a channel, DM, or thread. If a draft already exists for the same channel/thread it is replaced in place (so re-running this to edit a draft updates it rather than creating duplicates); otherwise a new draft is created. The draft is saved to the user's Drafts and is NOT sent automatically. Requires a session token (xoxc/xoxd); not available with bot or OAuth (xoxp) tokens."),
 			mcp.WithTitleAnnotation("Draft Message"),
 			mcp.WithString("channel_id",
 				mcp.Required(),

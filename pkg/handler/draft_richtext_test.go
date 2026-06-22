@@ -39,6 +39,59 @@ func flattenRichText(b *slack.RichTextBlock) string {
 	return sb.String()
 }
 
+// countEmptyTextElements recurses through a rich_text block and counts text
+// elements whose Text is "". Slack's drafts API rejects any such element with
+// "invalid_message", so the converter must never emit them.
+func countEmptyTextElements(b *slack.RichTextBlock) int {
+	n := 0
+	var sectionElems = func(elems []slack.RichTextSectionElement) {
+		for _, e := range elems {
+			if te, ok := e.(*slack.RichTextSectionTextElement); ok && te.Text == "" {
+				n++
+			}
+		}
+	}
+	for _, el := range b.Elements {
+		switch e := el.(type) {
+		case *slack.RichTextSection:
+			sectionElems(e.Elements)
+		case *slack.RichTextQuote:
+			sectionElems(e.Elements)
+		case *slack.RichTextPreformatted:
+			sectionElems(e.Elements)
+		case *slack.RichTextList:
+			for _, item := range e.Elements {
+				if s, ok := item.(*slack.RichTextSection); ok {
+					sectionElems(s.Elements)
+				}
+			}
+		}
+	}
+	return n
+}
+
+// Regression: markdown whose inline spans abut a line break (e.g. an emphasis
+// span immediately followed by a newline) used to emit empty text runs, which
+// Slack's drafts.create/drafts.update reject with "invalid_message".
+func TestMarkdownToRichTextBlock_NoEmptyTextElements(t *testing.T) {
+	input := ":sparkles: *New: `conversations_draft_message` now upserts drafts*\n" +
+		"Editing a draft actually updates it now instead of silently piling up duplicates.\n" +
+		"• Lists existing drafts and replaces the one targeting the same *channel/thread* in place\n" +
+		":point_right: Pull `feat/conversations-draft-upsert` to try it."
+
+	rtb, err := markdownToRichTextBlock(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := countEmptyTextElements(rtb); got != 0 {
+		t.Fatalf("expected no empty text elements, got %d", got)
+	}
+	// Content must still survive the empty-run filtering.
+	if missing := draftContentLoss(input, rtb); len(missing) > 0 {
+		t.Fatalf("content dropped after filtering empty runs: %v", missing)
+	}
+}
+
 func TestMarkdownToRichTextBlock_PreservesAllContent(t *testing.T) {
 	input := ":provectus: **AWOS v1.3.1 is out** — [release notes](https://example.com/x) — plugin unchanged.\n\n" +
 		"1. **Testing & regression, first-class.** New QA slice. (#109)\n" +
@@ -84,13 +137,45 @@ func TestMarkdownToRichTextBlock_PreservesAllContent(t *testing.T) {
 	}
 }
 
-func TestMarkdownToRichTextBlock_SeparatesParagraphAndList(t *testing.T) {
+// sectionText concatenates the text of a single rich_text_section's elements.
+func sectionText(s *slack.RichTextSection) string {
+	var sb strings.Builder
+	for _, e := range s.Elements {
+		switch el := e.(type) {
+		case *slack.RichTextSectionTextElement:
+			sb.WriteString(el.Text)
+		case *slack.RichTextSectionLinkElement:
+			sb.WriteString(el.Text)
+		}
+	}
+	return sb.String()
+}
+
+// Consecutive paragraphs merge into a single section joined by a blank line, so
+// the draft composer (which spaces top-level elements itself) renders exactly
+// one empty line between them instead of doubling it.
+func TestMarkdownToRichTextBlock_MergesParagraphs(t *testing.T) {
+	rtb, err := markdownToRichTextBlock("First.\n\nSecond.\n\nThird.")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rtb.Elements) != 1 {
+		t.Fatalf("expected paragraphs merged into one section, got %d elements", len(rtb.Elements))
+	}
+	sec, ok := rtb.Elements[0].(*slack.RichTextSection)
+	if !ok {
+		t.Fatalf("expected a rich_text_section, got %T", rtb.Elements[0])
+	}
+	if got := sectionText(sec); got != "First.\n\nSecond.\n\nThird." {
+		t.Fatalf("expected paragraphs joined by blank lines, got %q", got)
+	}
+}
+
+func TestMarkdownToRichTextBlock_ParagraphThenList(t *testing.T) {
 	rtb, err := markdownToRichTextBlock("Intro paragraph.\n\n1. first item\n2. second item")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Find the list and assert the element right before it is a newline separator,
-	// so the paragraph does not glue onto the list.
 	listIdx := -1
 	for i, el := range rtb.Elements {
 		if _, ok := el.(*slack.RichTextList); ok {
@@ -98,22 +183,17 @@ func TestMarkdownToRichTextBlock_SeparatesParagraphAndList(t *testing.T) {
 		}
 	}
 	if listIdx <= 0 {
-		t.Fatalf("expected a list preceded by other elements, list index=%d", listIdx)
+		t.Fatalf("expected a list preceded by the paragraph, list index=%d", listIdx)
 	}
+	// The element before the list is the paragraph's own section (no separator
+	// section); the composer supplies spacing between top-level elements.
 	prev, ok := rtb.Elements[listIdx-1].(*slack.RichTextSection)
-	if !ok || len(prev.Elements) != 1 {
-		t.Fatalf("expected a separator section before the list, got %T", rtb.Elements[listIdx-1])
-	}
-	// Paragraph precedes the list (a non-self-breaking block), so a blank-line
-	// separator ("\n\n") is needed to render an empty line before the list.
-	if te, ok := prev.Elements[0].(*slack.RichTextSectionTextElement); !ok || te.Text != "\n\n" {
-		t.Fatalf("expected blank-line separator before list, got %+v", prev.Elements[0])
+	if !ok || sectionText(prev) != "Intro paragraph." {
+		t.Fatalf("expected paragraph section before list, got %T %q", rtb.Elements[listIdx-1], sectionTextOrEmpty(rtb.Elements[listIdx-1]))
 	}
 }
 
-func TestMarkdownToRichTextBlock_SingleBreakAfterList(t *testing.T) {
-	// list -> paragraph: the list already emits a trailing newline, so the
-	// separator must be a single "\n" to avoid a double blank line.
+func TestMarkdownToRichTextBlock_ListThenParagraph(t *testing.T) {
 	rtb, err := markdownToRichTextBlock("1. one\n2. two\n\nAfter the list.")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -125,15 +205,19 @@ func TestMarkdownToRichTextBlock_SingleBreakAfterList(t *testing.T) {
 		}
 	}
 	if listIdx < 0 || listIdx+1 >= len(rtb.Elements) {
-		t.Fatalf("expected a list followed by more elements, list index=%d", listIdx)
+		t.Fatalf("expected a list followed by the paragraph, list index=%d", listIdx)
 	}
-	sep, ok := rtb.Elements[listIdx+1].(*slack.RichTextSection)
-	if !ok || len(sep.Elements) != 1 {
-		t.Fatalf("expected a separator section after the list, got %T", rtb.Elements[listIdx+1])
+	next, ok := rtb.Elements[listIdx+1].(*slack.RichTextSection)
+	if !ok || sectionText(next) != "After the list." {
+		t.Fatalf("expected paragraph section after list, got %T %q", rtb.Elements[listIdx+1], sectionTextOrEmpty(rtb.Elements[listIdx+1]))
 	}
-	if te, ok := sep.Elements[0].(*slack.RichTextSectionTextElement); !ok || te.Text != "\n" {
-		t.Fatalf("expected single-newline separator after list, got %+v", sep.Elements[0])
+}
+
+func sectionTextOrEmpty(el slack.RichTextElement) string {
+	if s, ok := el.(*slack.RichTextSection); ok {
+		return sectionText(s)
 	}
+	return ""
 }
 
 func TestMarkdownToRichTextBlock_NestedAndLooseLists(t *testing.T) {
@@ -187,6 +271,26 @@ func TestDraftContentLoss_DetectsMissingWord(t *testing.T) {
 	missing := draftContentLoss("alpha beta gamma", rtb)
 	if len(missing) != 1 || missing[0] != "gamma" {
 		t.Fatalf("expected [gamma], got %v", missing)
+	}
+}
+
+// A link whose label is itself formatted (bold/code) must keep its label text,
+// otherwise draftContentLoss sees the words as dropped and the handler refuses
+// the whole draft.
+func TestMarkdownToRichTextBlock_FormattedLinkLabelNoContentLoss(t *testing.T) {
+	for _, input := range []string{
+		"See [**bold label**](https://example.com) here.",
+		"Run [the `code` cmd](https://example.com/x) now.",
+	} {
+		t.Run(input, func(t *testing.T) {
+			rtb, err := markdownToRichTextBlock(input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if missing := draftContentLoss(input, rtb); len(missing) > 0 {
+				t.Fatalf("formatted link label dropped content: %v", missing)
+			}
+		})
 	}
 }
 

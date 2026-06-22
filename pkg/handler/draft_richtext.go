@@ -44,34 +44,46 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	doc := draftMD.Parser().Parse(gmtext.NewReader(source))
 
 	var elements []slack.RichTextElement
-	// Whether the previously appended block is "self-breaking" (lists, quotes and
-	// preformatted blocks render block-level and emit their own trailing newline).
-	prevSelfBreaking := false
+
+	// The Slack draft composer renders each top-level rich_text element as its
+	// own block and inserts its own spacing between them. Emitting a separate
+	// section per paragraph therefore double-spaces the result. Instead, merge
+	// consecutive inline blocks (paragraphs/headings) into ONE section, joining
+	// them with a blank line ("\n\n") so they render as distinct paragraphs with
+	// a single empty line between. Self-breaking blocks (lists, quotes, code) are
+	// their own elements; flush the pending inline section before each.
+	var inline []slack.RichTextSectionElement
+	flushInline := func() {
+		if len(inline) > 0 {
+			elements = append(elements, &slack.RichTextSection{Type: slack.RTESection, Elements: inline})
+			inline = nil
+		}
+	}
+	addInline := func(els []slack.RichTextSectionElement) {
+		if len(els) == 0 {
+			return
+		}
+		if len(inline) > 0 {
+			inline = append(inline, &slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: "\n\n"})
+		}
+		inline = append(inline, els...)
+	}
 
 	for n := doc.FirstChild(); n != nil; n = n.NextSibling() {
-		var els []slack.RichTextElement
-		selfBreaking := false
-
 		switch n.Kind() {
 		case ast.KindParagraph:
-			els = []slack.RichTextElement{&slack.RichTextSection{
-				Type:     slack.RTESection,
-				Elements: parseDraftInline(n, source, false),
-			}}
+			addInline(parseDraftInline(n, source, false))
 
 		case ast.KindHeading:
-			els = []slack.RichTextElement{&slack.RichTextSection{
-				Type:     slack.RTESection,
-				Elements: parseDraftInline(n, source, true),
-			}}
+			addInline(parseDraftInline(n, source, true))
 
 		case ast.KindList:
-			selfBreaking = true
-			els = buildRichTextLists(n.(*ast.List), source, 0)
+			flushInline()
+			elements = append(elements, buildRichTextLists(n.(*ast.List), source, 0)...)
 
 		case ast.KindFencedCodeBlock, ast.KindCodeBlock:
-			selfBreaking = true
-			els = []slack.RichTextElement{&slack.RichTextPreformatted{
+			flushInline()
+			elements = append(elements, &slack.RichTextPreformatted{
 				RichTextSection: slack.RichTextSection{
 					Type: slack.RTEPreformatted,
 					Elements: []slack.RichTextSectionElement{
@@ -81,42 +93,22 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 						},
 					},
 				},
-			}}
+			})
 
 		case ast.KindBlockquote:
-			selfBreaking = true
-			els = []slack.RichTextElement{&slack.RichTextQuote{
+			flushInline()
+			elements = append(elements, &slack.RichTextQuote{
 				Type:     slack.RTEQuote,
 				Elements: parseDraftInline(n, source, false),
-			}}
+			})
 
 		default:
 			// Unknown top-level block: best-effort text extraction so content is
 			// never silently dropped. draftContentLoss is the hard backstop.
-			inline := parseDraftInline(n, source, false)
-			if len(inline) == 0 {
-				continue
-			}
-			els = []slack.RichTextElement{&slack.RichTextSection{Type: slack.RTESection, Elements: inline}}
+			addInline(parseDraftInline(n, source, false))
 		}
-
-		if len(els) == 0 {
-			continue
-		}
-		// Separate top-level blocks so they render as distinct paragraphs. A blank
-		// line ("\n\n") is needed between inline sections, but after a self-breaking
-		// block (list/quote/code), which already emits a trailing newline, a single
-		// "\n" is enough to avoid a double blank line.
-		if len(elements) > 0 {
-			sep := "\n\n"
-			if prevSelfBreaking {
-				sep = "\n"
-			}
-			elements = append(elements, newlineSection(sep))
-		}
-		elements = append(elements, els...)
-		prevSelfBreaking = selfBreaking
 	}
+	flushInline()
 
 	// Never return an empty block: fall back to the raw text as one section so
 	// content is preserved even if the markdown produced no recognised nodes.
@@ -197,17 +189,6 @@ func buildRichTextLists(list *ast.List, source []byte, indent int) []slack.RichT
 	return out
 }
 
-// newlineSection is a rich_text_section containing only newline(s), used to
-// separate top-level blocks so they are not glued together in the composer.
-func newlineSection(text string) *slack.RichTextSection {
-	return &slack.RichTextSection{
-		Type: slack.RTESection,
-		Elements: []slack.RichTextSectionElement{
-			&slack.RichTextSectionTextElement{Type: slack.RTSEText, Text: text},
-		},
-	}
-}
-
 // codeBlockText extracts the raw text of a (fenced) code block.
 func codeBlockText(n ast.Node, source []byte) string {
 	var text string
@@ -235,11 +216,18 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 		case ast.KindText:
 			textNode := node.(*ast.Text)
 			text := string(textNode.Segment.Value(source))
-			elements = append(elements, &slack.RichTextSectionTextElement{
-				Type:  slack.RTSEText,
-				Text:  text,
-				Style: draftTextStyle(isBold || forceBold, isItalic),
-			})
+			// Skip empty text runs: Slack's drafts API rejects a rich_text
+			// section that contains a text element with an empty string
+			// ("invalid_message"). goldmark emits such empty runs at span
+			// boundaries (e.g. right after an emphasis close). The newline
+			// from a soft/hard break below is still emitted.
+			if text != "" {
+				elements = append(elements, &slack.RichTextSectionTextElement{
+					Type:  slack.RTSEText,
+					Text:  text,
+					Style: draftTextStyle(isBold || forceBold, isItalic),
+				})
+			}
 			if textNode.SoftLineBreak() || textNode.HardLineBreak() {
 				elements = append(elements, &slack.RichTextSectionTextElement{
 					Type: slack.RTSEText,
@@ -249,11 +237,13 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 
 		case ast.KindString:
 			strNode := node.(*ast.String)
-			elements = append(elements, &slack.RichTextSectionTextElement{
-				Type:  slack.RTSEText,
-				Text:  string(strNode.Value),
-				Style: draftTextStyle(isBold || forceBold, isItalic),
-			})
+			if text := string(strNode.Value); text != "" {
+				elements = append(elements, &slack.RichTextSectionTextElement{
+					Type:  slack.RTSEText,
+					Text:  text,
+					Style: draftTextStyle(isBold || forceBold, isItalic),
+				})
+			}
 
 		case ast.KindEmphasis:
 			emp := node.(*ast.Emphasis)
@@ -265,15 +255,13 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 
 		case ast.KindLink:
 			link := node.(*ast.Link)
-			var text string
-			for c := link.FirstChild(); c != nil; c = c.NextSibling() {
-				if c.Kind() == ast.KindText {
-					text += string(c.(*ast.Text).Segment.Value(source))
-				}
-			}
+			// Collect the label recursively: a rich_text link carries a single
+			// flat label, so a styled label like [**bold**](url) must still
+			// contribute its text. Collecting only direct Text children would
+			// drop it and trip draftContentLoss into refusing the whole draft.
 			elements = append(elements, &slack.RichTextSectionLinkElement{
 				Type: slack.RTSELink,
-				Text: text,
+				Text: inlineNodeText(link, source),
 				URL:  string(link.Destination),
 			})
 
@@ -287,15 +275,9 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 			})
 
 		case ast.KindCodeSpan:
-			var text string
-			for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-				if c.Kind() == ast.KindText {
-					text += string(c.(*ast.Text).Segment.Value(source))
-				}
-			}
 			elements = append(elements, &slack.RichTextSectionTextElement{
 				Type:  slack.RTSEText,
-				Text:  text,
+				Text:  inlineNodeText(node, source),
 				Style: &slack.RichTextSectionTextStyle{Code: true},
 			})
 
@@ -308,6 +290,28 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 
 	process(n, false, false)
 	return elements
+}
+
+// inlineNodeText returns the concatenated visible text of an inline node,
+// recursing through nested emphasis/code spans. Used for elements that carry a
+// single flat label (rich_text links, code spans), where styled child text must
+// still be captured. Mirrors how collectMarkdownText gathers label text, so the
+// draftContentLoss backstop stays balanced.
+func inlineNodeText(n ast.Node, source []byte) string {
+	var sb strings.Builder
+	_ = ast.Walk(n, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node.Kind() {
+		case ast.KindText:
+			sb.Write(node.(*ast.Text).Segment.Value(source))
+		case ast.KindString:
+			sb.Write(node.(*ast.String).Value)
+		}
+		return ast.WalkContinue, nil
+	})
+	return sb.String()
 }
 
 func draftTextStyle(isBold, isItalic bool) *slack.RichTextSectionTextStyle {
