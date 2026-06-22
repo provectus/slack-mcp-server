@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/korotovsky/slack-mcp-server/pkg/provider/edge"
 	"github.com/korotovsky/slack-mcp-server/pkg/test/util"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
@@ -647,6 +648,62 @@ func TestUnitIsDraftChannelAllowed(t *testing.T) {
 		}
 		if isDraftChannelAllowed("C999") {
 			t.Fatal("expected unlisted channel C999 to be denied")
+		}
+	})
+}
+
+func TestUnitFindDraftForDestination(t *testing.T) {
+	channelDraft := edge.Draft{
+		ID: "DrChan", ClientMsgID: "cm-chan", LastUpdatedTS: "1700000000.000100",
+		Destinations: []edge.DraftDestination{{ChannelID: "C123"}},
+	}
+	threadDraft := edge.Draft{
+		ID: "DrThread", ClientMsgID: "cm-thread", LastUpdatedTS: "1700000000.000200",
+		Destinations: []edge.DraftDestination{{ChannelID: "C123", ThreadTS: "1700000000.000001"}},
+	}
+	sentDraft := edge.Draft{
+		ID: "DrSent", IsSent: true,
+		Destinations: []edge.DraftDestination{{ChannelID: "C123"}},
+	}
+	deletedDraft := edge.Draft{
+		ID: "DrDel", IsDeleted: true,
+		Destinations: []edge.DraftDestination{{ChannelID: "C123"}},
+	}
+	scheduledDraft := edge.Draft{
+		ID: "DrSched", DateScheduled: 1799999999,
+		Destinations: []edge.DraftDestination{{ChannelID: "C123"}},
+	}
+
+	t.Run("matches channel-level draft", func(t *testing.T) {
+		got, found := findDraftForDestination([]edge.Draft{channelDraft, threadDraft}, "C123", "")
+		if !found || got.ID != "DrChan" {
+			t.Fatalf("got %+v found=%v, want DrChan", got, found)
+		}
+	})
+	t.Run("matches exact thread draft, not channel draft", func(t *testing.T) {
+		got, found := findDraftForDestination([]edge.Draft{channelDraft, threadDraft}, "C123", "1700000000.000001")
+		if !found || got.ID != "DrThread" {
+			t.Fatalf("got %+v found=%v, want DrThread", got, found)
+		}
+	})
+	t.Run("no match for different thread", func(t *testing.T) {
+		if _, found := findDraftForDestination([]edge.Draft{threadDraft}, "C123", "9999999999.000001"); found {
+			t.Fatal("expected no match for a different thread_ts")
+		}
+	})
+	t.Run("no match for different channel", func(t *testing.T) {
+		if _, found := findDraftForDestination([]edge.Draft{channelDraft}, "C999", ""); found {
+			t.Fatal("expected no match for a different channel")
+		}
+	})
+	t.Run("ignores sent, deleted and scheduled drafts", func(t *testing.T) {
+		if _, found := findDraftForDestination([]edge.Draft{sentDraft, deletedDraft, scheduledDraft}, "C123", ""); found {
+			t.Fatal("expected sent/deleted/scheduled drafts to be ignored")
+		}
+	})
+	t.Run("empty list", func(t *testing.T) {
+		if _, found := findDraftForDestination(nil, "C123", ""); found {
+			t.Fatal("expected no match in empty list")
 		}
 	})
 }
