@@ -164,6 +164,8 @@ type SlackAPI interface {
 	ClientUserBoot(ctx context.Context) (*edge.ClientUserBootResponse, error)
 	UsersSearch(ctx context.Context, query string, count int) ([]slack.User, error)
 	DraftsCreate(ctx context.Context, channelID, threadTs string, blocks json.RawMessage) (string, error)
+	DraftsList(ctx context.Context, limit int) ([]edge.Draft, error)
+	DraftsUpdate(ctx context.Context, draftID, clientMsgID, lastUpdatedTS, channelID, threadTs string, blocks json.RawMessage) error
 }
 
 type MCPSlackClient struct {
@@ -396,6 +398,14 @@ func (c *MCPSlackClient) UsersSearch(ctx context.Context, query string, count in
 
 func (c *MCPSlackClient) DraftsCreate(ctx context.Context, channelID, threadTs string, blocks json.RawMessage) (string, error) {
 	return c.edgeClient.DraftsCreate(ctx, channelID, threadTs, blocks)
+}
+
+func (c *MCPSlackClient) DraftsList(ctx context.Context, limit int) ([]edge.Draft, error) {
+	return c.edgeClient.DraftsList(ctx, limit)
+}
+
+func (c *MCPSlackClient) DraftsUpdate(ctx context.Context, draftID, clientMsgID, lastUpdatedTS, channelID, threadTs string, blocks json.RawMessage) error {
+	return c.edgeClient.DraftsUpdate(ctx, draftID, clientMsgID, lastUpdatedTS, channelID, threadTs, blocks)
 }
 
 func (c *MCPSlackClient) IsEnterprise() bool {
