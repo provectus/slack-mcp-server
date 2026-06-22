@@ -128,6 +128,8 @@ Creates or replaces a native Slack **draft** in a channel, DM, or thread. The dr
 
 > **Upsert by destination:** there is only ever one draft per channel/thread. If a draft already exists for the target `channel_id` (and `thread_ts`), this tool **replaces it in place** instead of creating a duplicate — so re-running it to edit a draft updates the existing one. A new draft is created only when none exists. Drafts that have already been sent, deleted, or scheduled are left untouched.
 
+> **Where the draft shows up:** the draft lives in Slack's **Drafts** list (left sidebar) — open it from there to view, edit, or send it. Slack's desktop channel composer does not auto-attach drafts created via the API, so use the Drafts list to access it.
+
 > **Note:** Drafting is disabled by default. Enable it via `SLACK_MCP_DRAFT_MESSAGE_TOOL` (`true`, `1`, a comma-separated channel allowlist, or `!Cxxxx` negation), or by listing `conversations_draft_message` in `SLACK_MCP_ENABLED_TOOLS`. This tool uses Slack's edge API and requires a **session token (`xoxc`/`xoxd`)** — it is not registered for bot (`xoxb`) or OAuth user (`xoxp`) tokens. `@username` in `channel_id` resolves to that user's DM; `@username` inside `text` is not converted to a mention.
 
 ### 10. users_search:

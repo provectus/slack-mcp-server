@@ -300,7 +300,7 @@ Write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `
 1. Set their specific environment variable (e.g., `SLACK_MCP_ADD_MESSAGE_TOOL`), or
 2. Explicitly list them in `SLACK_MCP_ENABLED_TOOLS`
 
-`conversations_draft_message` additionally requires a session token (`xoxc`/`xoxd`) — it is not registered for bot tokens because it relies on Slack's edge API.
+`conversations_draft_message` additionally requires a session token (`xoxc`/`xoxd`) — it is not registered for bot tokens because it relies on Slack's edge API. Drafts it creates or replaces appear in Slack's **Drafts** list; open them from there. Due to a Slack desktop-client limitation, an API-created draft is not auto-attached to a channel's message composer (the composer only auto-shows drafts that client composed locally), even though the draft is saved and kept up to date.
 
 #### Examples
 
