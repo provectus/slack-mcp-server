@@ -294,18 +294,35 @@ type draftResult struct {
 // replace. Drafts are a per-user, small set, so this is generous in practice.
 const draftsListLimit = 100
 
+// normalizeTS strips trailing zeros from a Slack timestamp's fractional part so
+// that two timestamps differing only in trailing-zero width compare equal.
+// Without this, a thread_ts echoed by drafts.list in a different fractional
+// width than the caller supplied would miss the match and create a duplicate.
+func normalizeTS(ts string) string {
+	i := strings.Index(ts, ".")
+	if i < 0 {
+		return ts
+	}
+	frac := strings.TrimRight(ts[i+1:], "0")
+	if frac == "" {
+		return ts[:i]
+	}
+	return ts[:i+1] + frac
+}
+
 // findDraftForDestination returns the active draft (if any) that targets the
 // given channel and thread. Sent, deleted, and scheduled drafts are skipped so
 // the upsert never clobbers a queued send or resurrects a removed draft. An
 // empty threadTs matches a channel-level draft; a set threadTs matches only the
-// draft for that exact thread.
+// draft for that exact thread (compared tolerant of trailing-zero ts widths).
 func findDraftForDestination(drafts []edge.Draft, channel, threadTs string) (edge.Draft, bool) {
+	wantThread := normalizeTS(threadTs)
 	for _, d := range drafts {
 		if d.IsSent || d.IsDeleted || d.DateScheduled != 0 {
 			continue
 		}
 		for _, dest := range d.Destinations {
-			if dest.ChannelID == channel && dest.ThreadTS == threadTs {
+			if dest.ChannelID == channel && normalizeTS(dest.ThreadTS) == wantThread {
 				return d, true
 			}
 		}

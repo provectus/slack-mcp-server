@@ -274,6 +274,26 @@ func TestDraftContentLoss_DetectsMissingWord(t *testing.T) {
 	}
 }
 
+// A link whose label is itself formatted (bold/code) must keep its label text,
+// otherwise draftContentLoss sees the words as dropped and the handler refuses
+// the whole draft.
+func TestMarkdownToRichTextBlock_FormattedLinkLabelNoContentLoss(t *testing.T) {
+	for _, input := range []string{
+		"See [**bold label**](https://example.com) here.",
+		"Run [the `code` cmd](https://example.com/x) now.",
+	} {
+		t.Run(input, func(t *testing.T) {
+			rtb, err := markdownToRichTextBlock(input)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if missing := draftContentLoss(input, rtb); len(missing) > 0 {
+				t.Fatalf("formatted link label dropped content: %v", missing)
+			}
+		})
+	}
+}
+
 func TestMarkdownToRichTextBlock_BoldAndLinkStyles(t *testing.T) {
 	rtb, err := markdownToRichTextBlock("Hello **bold** and [link](https://example.com).")
 	if err != nil {

@@ -686,6 +686,17 @@ func TestUnitFindDraftForDestination(t *testing.T) {
 			t.Fatalf("got %+v found=%v, want DrThread", got, found)
 		}
 	})
+	t.Run("matches thread despite trailing-zero ts width difference", func(t *testing.T) {
+		// drafts.list echoes "1700000000.000100"; caller supplied "1700000000.0001".
+		tzDraft := edge.Draft{
+			ID:           "DrTZ",
+			Destinations: []edge.DraftDestination{{ChannelID: "C123", ThreadTS: "1700000000.000100"}},
+		}
+		got, found := findDraftForDestination([]edge.Draft{tzDraft}, "C123", "1700000000.0001")
+		if !found || got.ID != "DrTZ" {
+			t.Fatalf("got %+v found=%v, want DrTZ", got, found)
+		}
+	})
 	t.Run("no match for different thread", func(t *testing.T) {
 		if _, found := findDraftForDestination([]edge.Draft{threadDraft}, "C123", "9999999999.000001"); found {
 			t.Fatal("expected no match for a different thread_ts")

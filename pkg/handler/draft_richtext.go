@@ -255,15 +255,13 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 
 		case ast.KindLink:
 			link := node.(*ast.Link)
-			var text string
-			for c := link.FirstChild(); c != nil; c = c.NextSibling() {
-				if c.Kind() == ast.KindText {
-					text += string(c.(*ast.Text).Segment.Value(source))
-				}
-			}
+			// Collect the label recursively: a rich_text link carries a single
+			// flat label, so a styled label like [**bold**](url) must still
+			// contribute its text. Collecting only direct Text children would
+			// drop it and trip draftContentLoss into refusing the whole draft.
 			elements = append(elements, &slack.RichTextSectionLinkElement{
 				Type: slack.RTSELink,
-				Text: text,
+				Text: inlineNodeText(link, source),
 				URL:  string(link.Destination),
 			})
 
@@ -277,15 +275,9 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 			})
 
 		case ast.KindCodeSpan:
-			var text string
-			for c := node.FirstChild(); c != nil; c = c.NextSibling() {
-				if c.Kind() == ast.KindText {
-					text += string(c.(*ast.Text).Segment.Value(source))
-				}
-			}
 			elements = append(elements, &slack.RichTextSectionTextElement{
 				Type:  slack.RTSEText,
-				Text:  text,
+				Text:  inlineNodeText(node, source),
 				Style: &slack.RichTextSectionTextStyle{Code: true},
 			})
 
@@ -298,6 +290,28 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 
 	process(n, false, false)
 	return elements
+}
+
+// inlineNodeText returns the concatenated visible text of an inline node,
+// recursing through nested emphasis/code spans. Used for elements that carry a
+// single flat label (rich_text links, code spans), where styled child text must
+// still be captured. Mirrors how collectMarkdownText gathers label text, so the
+// draftContentLoss backstop stays balanced.
+func inlineNodeText(n ast.Node, source []byte) string {
+	var sb strings.Builder
+	_ = ast.Walk(n, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
+		if !entering {
+			return ast.WalkContinue, nil
+		}
+		switch node.Kind() {
+		case ast.KindText:
+			sb.Write(node.(*ast.Text).Segment.Value(source))
+		case ast.KindString:
+			sb.Write(node.(*ast.String).Value)
+		}
+		return ast.WalkContinue, nil
+	})
+	return sb.String()
 }
 
 func draftTextStyle(isBold, isItalic bool) *slack.RichTextSectionTextStyle {

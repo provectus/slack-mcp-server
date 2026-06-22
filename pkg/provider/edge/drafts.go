@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"runtime/trace"
 	"strings"
 
@@ -68,11 +69,13 @@ func (cl *Client) DraftsCreate(ctx context.Context, channelID, threadTs string, 
 	}
 
 	form := draftsCreateForm{
-		BaseRequest:     BaseRequest{Token: cl.token},
-		ClientMsgID:     uuid.NewString(),
-		Blocks:          string(blocks),
-		Destinations:    dest,
-		FileIDs:         "[]",
+		BaseRequest:  BaseRequest{Token: cl.token},
+		ClientMsgID:  uuid.NewString(),
+		Blocks:       string(blocks),
+		Destinations: dest,
+		FileIDs:      "[]",
+		// Origin metadata only (does not control composer attachment); mirrors
+		// what the web client sends on drafts.create.
 		IsFromComposer:  false,
 		WebClientFields: webclientReason(""),
 	}
@@ -147,6 +150,12 @@ func (cl *Client) DraftsList(ctx context.Context, limit int) ([]Draft, error) {
 	if err := r.validate("drafts.list"); err != nil {
 		return nil, err
 	}
+	if r.HasMore {
+		// We don't paginate (drafts are a small per-user set). Surface the rare
+		// case where an existing draft sits beyond the limit, since the upsert
+		// could then miss it and create a duplicate.
+		slog.Default().Warn("drafts.list returned more drafts than the fetch limit; a draft beyond the limit may be missed", "limit", limit)
+	}
 	return r.Drafts, nil
 }
 
@@ -209,9 +218,11 @@ func (cl *Client) DraftsUpdate(ctx context.Context, draftID, clientMsgID, lastUp
 		Blocks:              string(blocks),
 		Destinations:        dest,
 		FileIDs:             "[]",
-		IsFromComposer:      "true",
-		DateScheduled:       "0",
-		WebClientFields:     webclientReason(""),
+		// Origin metadata only (does not control composer attachment); mirrors
+		// what the web client sends on drafts.update.
+		IsFromComposer:  "true",
+		DateScheduled:   "0",
+		WebClientFields: webclientReason(""),
 	}
 
 	resp, err := cl.PostForm(ctx, "drafts.update", values(form, true))
