@@ -235,11 +235,18 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 		case ast.KindText:
 			textNode := node.(*ast.Text)
 			text := string(textNode.Segment.Value(source))
-			elements = append(elements, &slack.RichTextSectionTextElement{
-				Type:  slack.RTSEText,
-				Text:  text,
-				Style: draftTextStyle(isBold || forceBold, isItalic),
-			})
+			// Skip empty text runs: Slack's drafts API rejects a rich_text
+			// section that contains a text element with an empty string
+			// ("invalid_message"). goldmark emits such empty runs at span
+			// boundaries (e.g. right after an emphasis close). The newline
+			// from a soft/hard break below is still emitted.
+			if text != "" {
+				elements = append(elements, &slack.RichTextSectionTextElement{
+					Type:  slack.RTSEText,
+					Text:  text,
+					Style: draftTextStyle(isBold || forceBold, isItalic),
+				})
+			}
 			if textNode.SoftLineBreak() || textNode.HardLineBreak() {
 				elements = append(elements, &slack.RichTextSectionTextElement{
 					Type: slack.RTSEText,
@@ -249,11 +256,13 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 
 		case ast.KindString:
 			strNode := node.(*ast.String)
-			elements = append(elements, &slack.RichTextSectionTextElement{
-				Type:  slack.RTSEText,
-				Text:  string(strNode.Value),
-				Style: draftTextStyle(isBold || forceBold, isItalic),
-			})
+			if text := string(strNode.Value); text != "" {
+				elements = append(elements, &slack.RichTextSectionTextElement{
+					Type:  slack.RTSEText,
+					Text:  text,
+					Style: draftTextStyle(isBold || forceBold, isItalic),
+				})
+			}
 
 		case ast.KindEmphasis:
 			emp := node.(*ast.Emphasis)

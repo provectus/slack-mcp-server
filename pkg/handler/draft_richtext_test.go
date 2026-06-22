@@ -39,6 +39,59 @@ func flattenRichText(b *slack.RichTextBlock) string {
 	return sb.String()
 }
 
+// countEmptyTextElements recurses through a rich_text block and counts text
+// elements whose Text is "". Slack's drafts API rejects any such element with
+// "invalid_message", so the converter must never emit them.
+func countEmptyTextElements(b *slack.RichTextBlock) int {
+	n := 0
+	var sectionElems = func(elems []slack.RichTextSectionElement) {
+		for _, e := range elems {
+			if te, ok := e.(*slack.RichTextSectionTextElement); ok && te.Text == "" {
+				n++
+			}
+		}
+	}
+	for _, el := range b.Elements {
+		switch e := el.(type) {
+		case *slack.RichTextSection:
+			sectionElems(e.Elements)
+		case *slack.RichTextQuote:
+			sectionElems(e.Elements)
+		case *slack.RichTextPreformatted:
+			sectionElems(e.Elements)
+		case *slack.RichTextList:
+			for _, item := range e.Elements {
+				if s, ok := item.(*slack.RichTextSection); ok {
+					sectionElems(s.Elements)
+				}
+			}
+		}
+	}
+	return n
+}
+
+// Regression: markdown whose inline spans abut a line break (e.g. an emphasis
+// span immediately followed by a newline) used to emit empty text runs, which
+// Slack's drafts.create/drafts.update reject with "invalid_message".
+func TestMarkdownToRichTextBlock_NoEmptyTextElements(t *testing.T) {
+	input := ":sparkles: *New: `conversations_draft_message` now upserts drafts*\n" +
+		"Editing a draft actually updates it now instead of silently piling up duplicates.\n" +
+		"• Lists existing drafts and replaces the one targeting the same *channel/thread* in place\n" +
+		":point_right: Pull `feat/conversations-draft-upsert` to try it."
+
+	rtb, err := markdownToRichTextBlock(input)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := countEmptyTextElements(rtb); got != 0 {
+		t.Fatalf("expected no empty text elements, got %d", got)
+	}
+	// Content must still survive the empty-run filtering.
+	if missing := draftContentLoss(input, rtb); len(missing) > 0 {
+		t.Fatalf("content dropped after filtering empty runs: %v", missing)
+	}
+}
+
 func TestMarkdownToRichTextBlock_PreservesAllContent(t *testing.T) {
 	input := ":provectus: **AWOS v1.3.1 is out** — [release notes](https://example.com/x) — plugin unchanged.\n\n" +
 		"1. **Testing & regression, first-class.** New QA slice. (#109)\n" +
