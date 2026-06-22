@@ -115,7 +115,8 @@ type Draft struct {
 
 type draftsListForm struct {
 	BaseRequest
-	Limit int `json:"limit"`
+	Limit    int  `json:"limit"`
+	IsActive bool `json:"is_active"`
 	WebClientFields
 }
 
@@ -125,8 +126,12 @@ type draftsListResponse struct {
 	HasMore bool    `json:"has_more"`
 }
 
-// DraftsList returns the caller's existing drafts (up to limit). Requires a
-// session token (xoxc/xoxd); bot tokens cannot reach the edge API.
+// DraftsList returns the caller's active drafts (up to limit). It requests
+// is_active=true because drafts.list otherwise returns every draft including
+// sent ones and the server caps the page at 100 — so without the filter an
+// active draft can be buried past the cap and missed, causing the upsert to
+// create a duplicate. Requires a session token (xoxc/xoxd); bot tokens cannot
+// reach the edge API.
 func (cl *Client) DraftsList(ctx context.Context, limit int) ([]Draft, error) {
 	ctx, task := trace.NewTask(ctx, "DraftsList")
 	defer task.End()
@@ -135,6 +140,7 @@ func (cl *Client) DraftsList(ctx context.Context, limit int) ([]Draft, error) {
 	form := draftsListForm{
 		BaseRequest:     BaseRequest{Token: cl.token},
 		Limit:           limit,
+		IsActive:        true,
 		WebClientFields: webclientReason(""),
 	}
 

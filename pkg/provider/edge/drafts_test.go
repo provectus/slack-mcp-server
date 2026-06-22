@@ -113,6 +113,25 @@ func TestDraftsUpdateFormValues(t *testing.T) {
 	}
 }
 
+func TestDraftsListFormValues(t *testing.T) {
+	// drafts.list must request only active drafts: it otherwise returns sent
+	// drafts too and the server caps the page at 100, so an active draft can be
+	// buried past the cap and missed.
+	form := draftsListForm{
+		BaseRequest:     BaseRequest{Token: "xoxc-test"},
+		Limit:           100,
+		IsActive:        true,
+		WebClientFields: webclientReason(""),
+	}
+	v := values(form, true)
+	if got := v.Get("is_active"); got != "true" {
+		t.Errorf("is_active = %q, want \"true\" (all: %v)", got, url.Values(v))
+	}
+	if got := v.Get("limit"); got != "100" {
+		t.Errorf("limit = %q, want \"100\"", got)
+	}
+}
+
 func TestDraftsListResponseParsing(t *testing.T) {
 	body := `{"ok":true,"drafts":[
 		{"id":"Dr1","client_msg_id":"cm1","last_updated_ts":"1700000000.000100","date_scheduled":0,"is_sent":false,"is_deleted":false,"destinations":[{"channel_id":"C123"}]},
