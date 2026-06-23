@@ -32,9 +32,22 @@ const (
 	ToolReactionsRemove             = "reactions_remove"
 	ToolAttachmentGetData           = "attachment_get_data"
 	ToolConversationsSearchMessages = "conversations_search_messages"
+	ToolConversationsUnreads        = "conversations_unreads"
 	ToolConversationsMark           = "conversations_mark"
 	ToolConversationsDraftMessage   = "conversations_draft_message"
+	ToolConversationsLeave          = "conversations_leave"
+	ToolConversationsJoin           = "conversations_join"
 	ToolChannelsList                = "channels_list"
+	ToolChannelsMe                  = "channels_me"
+	ToolUsergroupsList              = "usergroups_list"
+	ToolUsergroupsMe                = "usergroups_me"
+	ToolUsergroupsCreate            = "usergroups_create"
+	ToolUsergroupsUpdate            = "usergroups_update"
+	ToolUsergroupsUsersUpdate       = "usergroups_users_update"
+	ToolUsersSearch                 = "users_search"
+	ToolSavedList                   = "saved_list"
+	ToolSavedUpdate                 = "saved_update"
+	ToolSavedClearCompleted         = "saved_clear_completed"
 )
 
 var ValidToolNames = []string{
@@ -45,9 +58,22 @@ var ValidToolNames = []string{
 	ToolReactionsRemove,
 	ToolAttachmentGetData,
 	ToolConversationsSearchMessages,
+	ToolConversationsUnreads,
 	ToolConversationsMark,
 	ToolConversationsDraftMessage,
+	ToolConversationsLeave,
+	ToolConversationsJoin,
 	ToolChannelsList,
+	ToolChannelsMe,
+	ToolUsergroupsList,
+	ToolUsergroupsMe,
+	ToolUsergroupsCreate,
+	ToolUsergroupsUpdate,
+	ToolUsergroupsUsersUpdate,
+	ToolUsersSearch,
+	ToolSavedList,
+	ToolSavedUpdate,
+	ToolSavedClearCompleted,
 }
 
 func ValidateEnabledTools(tools []string) error {
@@ -95,6 +121,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 		version.Version,
 		server.WithLogging(),
 		server.WithRecovery(),
+		server.WithToolHandlerMiddleware(buildErrorRecoveryMiddleware(logger)),
 		server.WithToolHandlerMiddleware(buildLoggerMiddleware(logger)),
 		server.WithToolHandlerMiddleware(auth.BuildMiddleware(provider.ServerTransport(), logger)),
 	)
@@ -168,7 +195,10 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			),
 			mcp.WithString("content_type",
 				mcp.DefaultString("text/markdown"),
-				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'."),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Ignored when blocks is provided."),
+			),
+			mcp.WithString("blocks",
+				mcp.Description("Raw Slack Block Kit JSON array for rich message formatting (rich_text lists, code blocks, etc.). When provided, this takes precedence over text/content_type for rendering. The text parameter becomes the notification fallback text."),
 			),
 		), conversationsHandler.ConversationsAddMessageHandler)
 	}
@@ -269,7 +299,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			mcp.WithReadOnlyHintAnnotation(true),
 			mcp.WithString("file_id",
 				mcp.Required(),
-				mcp.Description("The ID of the attachment to download, in format Fxxxxxxxxxx. Attachment IDs can be found in message metadata when HasMedia is true or AttachmentCount > 0."),
+				mcp.Description("The ID of the attachment to download, in format Fxxxxxxxxxx. Attachment IDs (with filenames) can be found in the AttachmentIDs field of message metadata when FileCount > 0."),
 			),
 		), conversationsHandler.FilesGetHandler)
 	}
@@ -322,21 +352,97 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 		s.AddTool(conversationsSearchTool, conversationsHandler.ConversationsSearchHandler)
 	}
 
-	s.AddTool(mcp.NewTool("users_search",
-		mcp.WithDescription("Search for users by name, email, or display name. Returns user details and DM channel ID if available."),
-		mcp.WithTitleAnnotation("Search Users"),
-		mcp.WithReadOnlyHintAnnotation(true),
-		mcp.WithString("query",
-			mcp.Required(),
-			mcp.Description("Search query - matches against real name, display name, username, or email."),
-		),
-		mcp.WithNumber("limit",
-			mcp.DefaultNumber(10),
-			mcp.Description("Maximum number of results to return (1-100). Default is 10."),
-		),
-	), conversationsHandler.UsersSearchHandler)
+	if shouldAddTool(ToolUsersSearch, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolUsersSearch,
+			mcp.WithDescription("Search for users by name, email, display name, or Slack user ID. If a Slack user ID is provided (e.g. U07VCEPP4N5), the user is looked up directly. Returns user details and DM channel ID if available."),
+			mcp.WithTitleAnnotation("Search Users"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("query",
+				mcp.Required(),
+				mcp.Description("Search query - matches against real name, display name, username, email, or a Slack user ID (e.g. U07VCEPP4N5)."),
+			),
+			mcp.WithNumber("limit",
+				mcp.DefaultNumber(10),
+				mcp.Description("Maximum number of results to return (1-100). Default is 10."),
+			),
+		), conversationsHandler.UsersSearchHandler)
+	}
 
+	// Register unreads tool - gets all unread messages across channels efficiently.
+	// Bot tokens (xoxb) don't support unread tracking, so exclude them (same pattern as search tool).
+	if !provider.IsBotToken() && shouldAddTool(ToolConversationsUnreads, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolConversationsUnreads,
+			mcp.WithDescription("Get unread messages across all channels. With browser session tokens (xoxc/xoxd), uses a single API call for complete results. With OAuth user tokens (xoxp), scans a subset of channels per type (limited by max_channels) — results may be partial on large workspaces. Results are prioritized: DMs > group DMs > partner channels > internal channels."),
+			mcp.WithTitleAnnotation("Get Unread Messages"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithBoolean("include_messages",
+				mcp.Description("If true (default), returns the actual unread messages. If false, returns only a summary of channels with unreads."),
+				mcp.DefaultBool(true),
+			),
+			mcp.WithString("channel_types",
+				mcp.Description("Filter by channel type: 'all' (default), 'dm' (direct messages), 'group_dm' (group DMs), 'partner' (ext-* channels), 'internal' (other channels)."),
+				mcp.DefaultString("all"),
+			),
+			mcp.WithNumber("max_channels",
+				mcp.Description("Maximum number of channels to fetch unreads from. Default is 50."),
+				mcp.DefaultNumber(50),
+			),
+			mcp.WithNumber("max_messages_per_channel",
+				mcp.Description("Maximum messages to fetch per channel. Default is 10."),
+				mcp.DefaultNumber(10),
+			),
+			mcp.WithBoolean("mentions_only",
+				mcp.Description("If true, only returns channels where you have @mentions. Default is false."),
+				mcp.DefaultBool(false),
+			),
+			mcp.WithBoolean("include_muted",
+				mcp.Description("If true, includes muted channels in results. Default is false (muted channels are excluded, matching Slack app behavior)."),
+				mcp.DefaultBool(false),
+			),
+		), conversationsHandler.ConversationsUnreadsHandler)
+	}
+
+	// Register mark tool - marks a channel as read
+	if shouldAddTool(ToolConversationsMark, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolConversationsMark,
+			mcp.WithDescription("Mark a channel or DM as read. If no timestamp is provided, marks all messages as read."),
+			mcp.WithTitleAnnotation("Mark as Read"),
+			mcp.WithDestructiveHintAnnotation(false),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... (e.g., #general, @username)."),
+			),
+			mcp.WithString("ts",
+				mcp.Description("Timestamp of the message to mark as read up to. If not provided, marks all messages as read."),
+			),
+		), conversationsHandler.ConversationsMarkHandler)
+	}
+
+	if shouldAddTool(ToolConversationsLeave, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolConversationsLeave,
+			mcp.WithDescription("Leave a channel, group conversation, or DM. Cannot leave the #general channel."),
+			mcp.WithTitleAnnotation("Leave Channel"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... (e.g., #general, @username)."),
+			),
+		), conversationsHandler.ConversationsLeaveHandler)
+	}
+
+	if shouldAddTool(ToolConversationsJoin, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolConversationsJoin,
+			mcp.WithDescription("Join a public channel. Use channels_list or channels_me to find channel IDs."),
+			mcp.WithTitleAnnotation("Join Channel"),
+			mcp.WithIdempotentHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... (e.g., #general)."),
+			),
+		), conversationsHandler.ConversationsJoinHandler)
+	}
 	channelsHandler := handler.NewChannelsHandler(provider, logger)
+	usergroupsHandler := handler.NewUsergroupsHandler(provider, logger)
 
 	if shouldAddTool(ToolChannelsList, enabledTools, "") {
 		s.AddTool(mcp.NewTool(ToolChannelsList,
@@ -361,7 +467,185 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("If true, forces a refresh of the channels cache from Slack API before returning results. Rate-limited to once per 30 seconds. Default is false."),
 				mcp.DefaultBool(false),
 			),
+			mcp.WithString("query",
+				mcp.Description("Optional keyword to filter channels. Case-insensitive substring match against the fields specified by query_targets. Example: 'marketing' returns channels like #marketing, #marketing-ops."),
+			),
+			mcp.WithString("query_targets",
+				mcp.DefaultString("name"),
+				mcp.Description("Comma-separated list of fields to match the query against. Allowed values: 'name', 'topic', 'purpose'. Example: 'name,topic,purpose' to search all fields. Default is 'name'."),
+			),
 		), channelsHandler.ChannelsHandler)
+	}
+
+	if shouldAddTool(ToolChannelsMe, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolChannelsMe,
+			mcp.WithDescription("List channels you are a member of. Unlike channels_list which returns all workspace channels, this returns only channels you have joined. Useful on large workspaces where channels_list returns thousands of results."),
+			mcp.WithTitleAnnotation("My Channels"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("channel_types",
+				mcp.Description("Comma-separated channel types. Allowed values: 'mpim', 'im', 'public_channel', 'private_channel'. Default: 'public_channel,private_channel'."),
+			),
+			mcp.WithNumber("limit",
+				mcp.DefaultNumber(100),
+				mcp.Description("Maximum number of items to return (1-999)."),
+			),
+			mcp.WithString("cursor",
+				mcp.Description("Cursor for pagination."),
+			),
+		), channelsHandler.ChannelsMeHandler)
+	}
+
+	// User groups tools
+	if shouldAddTool(ToolUsergroupsList, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolUsergroupsList,
+			mcp.WithDescription("List all user groups (subteams) in the Slack workspace. User groups are mention groups like @engineering or @design that notify all members. Use this to discover available groups, check group membership counts, or find a group's ID before joining/updating it. Returns CSV with columns: id, name, handle, description, user_count, is_external."),
+			mcp.WithTitleAnnotation("List User Groups"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithBoolean("include_users",
+				mcp.Description("Include list of user IDs in each group. Default is false."),
+				mcp.DefaultBool(false),
+			),
+			mcp.WithBoolean("include_count",
+				mcp.Description("Include user count for each group. Default is true."),
+				mcp.DefaultBool(true),
+			),
+			mcp.WithBoolean("include_disabled",
+				mcp.Description("Include disabled/archived groups. Default is false."),
+				mcp.DefaultBool(false),
+			),
+		), usergroupsHandler.UsergroupsListHandler)
+	}
+
+	if shouldAddTool(ToolUsergroupsMe, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolUsergroupsMe,
+			mcp.WithDescription("Manage your own user group membership. Use action='list' to see which groups you belong to. Use action='join' with a usergroup_id to add yourself to a group (e.g., to receive @mentions). Use action='leave' with a usergroup_id to remove yourself. This is the easiest way to join/leave groups without needing to know the full member list."),
+			mcp.WithTitleAnnotation("My User Groups"),
+			mcp.WithString("action",
+				mcp.Required(),
+				mcp.Description("Action to perform: 'list' returns CSV of groups you're a member of, 'join' adds you to a group, 'leave' removes you from a group."),
+			),
+			mcp.WithString("usergroup_id",
+				mcp.Description("ID of the user group (starts with 'S', e.g., 'S0123456789'). Required for 'join' and 'leave' actions. Get IDs from usergroups_list."),
+			),
+		), usergroupsHandler.UsergroupsMeHandler)
+	}
+
+	if shouldAddTool(ToolUsergroupsCreate, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolUsergroupsCreate,
+			mcp.WithDescription("Create a new user group (mention group) in the Slack workspace. After creation, use usergroups_users_update to add members, or users can join themselves with usergroups_me. The handle becomes the @mention (e.g., handle='engineering' creates @engineering)."),
+			mcp.WithTitleAnnotation("Create User Group"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("name",
+				mcp.Required(),
+				mcp.Description("Display name of the user group (e.g., 'Engineering Team', 'Design Squad')."),
+			),
+			mcp.WithString("handle",
+				mcp.Description("The @mention handle without the @ symbol (e.g., 'engineering' for @engineering). Keep it short and lowercase. If omitted, Slack auto-generates one from the name."),
+			),
+			mcp.WithString("description",
+				mcp.Description("Purpose or description shown in group details (e.g., 'Backend and frontend engineers')."),
+			),
+			mcp.WithString("channels",
+				mcp.Description("Comma-separated channel IDs where this group is commonly mentioned. Members get suggestions to join these channels."),
+			),
+		), usergroupsHandler.UsergroupsCreateHandler)
+	}
+
+	if shouldAddTool(ToolUsergroupsUpdate, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolUsergroupsUpdate,
+			mcp.WithDescription("Update a user group's metadata: name, handle (@mention), description, or default channels. Does NOT change members - use usergroups_users_update for that. At least one field must be provided."),
+			mcp.WithTitleAnnotation("Update User Group"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("usergroup_id",
+				mcp.Required(),
+				mcp.Description("ID of the user group to update (starts with 'S', e.g., 'S0123456789'). Get IDs from usergroups_list."),
+			),
+			mcp.WithString("name",
+				mcp.Description("New display name for the group."),
+			),
+			mcp.WithString("handle",
+				mcp.Description("New @mention handle (without @). Changing this changes how users mention the group."),
+			),
+			mcp.WithString("description",
+				mcp.Description("New description for the group."),
+			),
+			mcp.WithString("channels",
+				mcp.Description("New default channel IDs (comma-separated). Replaces existing default channels."),
+			),
+		), usergroupsHandler.UsergroupsUpdateHandler)
+	}
+
+	if shouldAddTool(ToolUsergroupsUsersUpdate, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolUsergroupsUsersUpdate,
+			mcp.WithDescription("Replace all members of a user group with a new list. WARNING: This completely replaces the member list - any user not in the 'users' parameter will be removed. To add/remove just yourself, use usergroups_me instead. To add a single user without removing others, first get current members from usergroups_list with include_users=true, then call this with the combined list."),
+			mcp.WithTitleAnnotation("Update User Group Members"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("usergroup_id",
+				mcp.Required(),
+				mcp.Description("ID of the user group (starts with 'S', e.g., 'S0123456789'). Get IDs from usergroups_list."),
+			),
+			mcp.WithString("users",
+				mcp.Required(),
+				mcp.Description("Comma-separated user IDs that will become the COMPLETE member list (e.g., 'U0123456789,U9876543210'). All current members not in this list will be removed."),
+			),
+		), usergroupsHandler.UsergroupsUsersUpdateHandler)
+	}
+
+	// Register saved items tools — "Save for Later" panel management.
+	// Requires browser session tokens (xoxc/xoxd); not available for bot or OAuth tokens.
+	if !provider.IsBotToken() && !provider.IsOAuth() && shouldAddTool(ToolSavedList, enabledTools, "") {
+		savedHandler := handler.NewSavedHandler(provider, logger, conversationsHandler)
+		s.AddTool(mcp.NewTool(ToolSavedList,
+			mcp.WithDescription("List saved items from Slack's 'Save for Later' panel. Returns items the user has saved, with optional message content. Replaces the deprecated stars.list API. Requires browser session tokens (xoxc/xoxd)."),
+			mcp.WithTitleAnnotation("List Saved Items"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("filter",
+				mcp.Description("Filter saved items: 'saved' (active/in-progress, default), 'completed' (marked done), 'archived'."),
+				mcp.DefaultString("saved"),
+			),
+			mcp.WithNumber("limit",
+				mcp.Description("Maximum number of items to return. Auto-paginates. Default is 50."),
+				mcp.DefaultNumber(50),
+			),
+			mcp.WithBoolean("include_messages",
+				mcp.Description("If true (default), fetches the actual saved message content. If false, returns metadata only."),
+				mcp.DefaultBool(true),
+			),
+			mcp.WithNumber("max_messages_per_item",
+				mcp.Description("Max messages to fetch per saved item (for thread replies). Default is 5."),
+				mcp.DefaultNumber(5),
+			),
+		), savedHandler.SavedListHandler)
+
+		if shouldAddTool(ToolSavedUpdate, enabledTools, "") {
+			s.AddTool(mcp.NewTool(ToolSavedUpdate,
+				mcp.WithDescription("Update a saved item: mark as completed, set a due date, or both. Use item_id and ts values from saved_list output. Replaces the deprecated stars.add/stars.remove APIs."),
+				mcp.WithTitleAnnotation("Update Saved Item"),
+				mcp.WithDestructiveHintAnnotation(true),
+				mcp.WithString("item_id",
+					mcp.Required(),
+					mcp.Description("Channel/DM ID where the saved message lives (from saved_list output)."),
+				),
+				mcp.WithString("ts",
+					mcp.Required(),
+					mcp.Description("Message timestamp of the saved item (from saved_list output)."),
+				),
+				mcp.WithString("mark",
+					mcp.Description("Set to 'completed' to mark the item as done."),
+				),
+				mcp.WithNumber("date_due",
+					mcp.Description("Unix timestamp for due date/reminder. Set to 0 to clear."),
+				),
+			), savedHandler.SavedUpdateHandler)
+		}
+
+		if shouldAddTool(ToolSavedClearCompleted, enabledTools, "") {
+			s.AddTool(mcp.NewTool(ToolSavedClearCompleted,
+				mcp.WithDescription("Clear all completed saved items from the 'Save for Later' panel. This is a bulk operation that removes all items with state='completed'."),
+				mcp.WithTitleAnnotation("Clear Completed Saved Items"),
+				mcp.WithDestructiveHintAnnotation(true),
+			), savedHandler.SavedClearCompletedHandler)
+		}
 	}
 
 	logger.Info("Authenticating with Slack API...",
@@ -459,6 +743,25 @@ func (s *MCPServer) ServeStdio() error {
 		s.logger.Error("STDIO server error", zap.Error(err))
 	}
 	return err
+}
+
+// buildErrorRecoveryMiddleware converts tool handler errors into MCP tool results
+// with isError=true, allowing LLMs to see the error and retry with different parameters.
+// Without this, errors become JSON-RPC -32603 protocol errors that crash MCP clients.
+func buildErrorRecoveryMiddleware(logger *zap.Logger) server.ToolHandlerMiddleware {
+	return func(next server.ToolHandlerFunc) server.ToolHandlerFunc {
+		return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+			res, err := next(ctx, req)
+			if err != nil {
+				logger.Warn("Tool call returned error, converting to isError tool result",
+					zap.String("tool", req.Params.Name),
+					zap.Error(err),
+				)
+				return mcp.NewToolResultError(err.Error()), nil
+			}
+			return res, nil
+		}
+	}
 }
 
 func buildLoggerMiddleware(logger *zap.Logger) server.ToolHandlerMiddleware {

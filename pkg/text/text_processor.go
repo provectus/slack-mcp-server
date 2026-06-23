@@ -18,7 +18,11 @@ func AttachmentToText(att slack.Attachment) string {
 	var parts []string
 
 	if att.Title != "" {
-		parts = append(parts, fmt.Sprintf("Title: %s", att.Title))
+		if att.TitleLink != "" {
+			parts = append(parts, fmt.Sprintf("Title: [%s](%s)", att.Title, att.TitleLink))
+		} else {
+			parts = append(parts, fmt.Sprintf("Title: %s", att.Title))
+		}
 	}
 
 	if att.AuthorName != "" {
@@ -33,10 +37,24 @@ func AttachmentToText(att slack.Attachment) string {
 		parts = append(parts, fmt.Sprintf("Text: %s", att.Text))
 	}
 
+	for _, f := range att.Fields {
+		if f.Title != "" && f.Value != "" {
+			parts = append(parts, fmt.Sprintf("%s: %s", f.Title, f.Value))
+		} else if f.Title != "" {
+			parts = append(parts, f.Title)
+		} else if f.Value != "" {
+			parts = append(parts, f.Value)
+		}
+	}
+
 	if att.Footer != "" {
 		ts, _ := TimestampToIsoRFC3339(string(att.Ts) + ".000000")
 
 		parts = append(parts, fmt.Sprintf("Footer: %s @ %s", att.Footer, ts))
+	}
+
+	if blocksText := BlocksToText(att.Blocks); blocksText != "" {
+		parts = append(parts, fmt.Sprintf("Blocks: %s", blocksText))
 	}
 
 	result := strings.Join(parts, "; ")
@@ -44,11 +62,161 @@ func AttachmentToText(att slack.Attachment) string {
 	result = strings.ReplaceAll(result, "\n", " ")
 	result = strings.ReplaceAll(result, "\r", " ")
 	result = strings.ReplaceAll(result, "\t", " ")
-	result = strings.ReplaceAll(result, "(", "[")
-	result = strings.ReplaceAll(result, ")", "]")
 	result = strings.TrimSpace(result)
 
 	return result
+}
+
+// BlocksToText extracts text content from Slack Block Kit structures.
+func BlocksToText(blocks slack.Blocks) string {
+	if len(blocks.BlockSet) == 0 {
+		return ""
+	}
+
+	var parts []string
+
+	for _, block := range blocks.BlockSet {
+		switch b := block.(type) {
+		case *slack.HeaderBlock:
+			if b.Text != nil && b.Text.Text != "" {
+				parts = append(parts, b.Text.Text)
+			}
+		case *slack.SectionBlock:
+			if b.Text != nil && b.Text.Text != "" {
+				parts = append(parts, b.Text.Text)
+			}
+			for _, field := range b.Fields {
+				if field != nil && field.Text != "" {
+					parts = append(parts, field.Text)
+				}
+			}
+		case *slack.RichTextBlock:
+			if t := richTextBlockToText(b); t != "" {
+				parts = append(parts, t)
+			}
+		case *slack.ContextBlock:
+			for _, elem := range b.ContextElements.Elements {
+				if txt, ok := elem.(*slack.TextBlockObject); ok && txt != nil && txt.Text != "" {
+					parts = append(parts, txt.Text)
+				}
+			}
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+// FilesToText extracts text metadata from email file attachments.
+// Separators are chosen so the metadata survives the text-processing pipeline.
+func FilesToText(files []slack.File) string {
+	var parts []string
+
+	for _, f := range files {
+		if f.Filetype != "email" && f.Mode != "email" {
+			continue
+		}
+
+		var emailParts []string
+
+		if len(f.From) > 0 {
+			if s := formatEmailUser(f.From[0]); s != "" {
+				emailParts = append(emailParts, "From: "+s)
+			}
+		}
+
+		if len(f.Cc) > 0 {
+			var ccParts []string
+			for _, c := range f.Cc {
+				if s := formatEmailUser(c); s != "" {
+					ccParts = append(ccParts, s)
+				}
+			}
+			if len(ccParts) > 0 {
+				emailParts = append(emailParts, "CC: "+strings.Join(ccParts, "/"))
+			}
+		}
+
+		if f.Subject != "" {
+			emailParts = append(emailParts, fmt.Sprintf("Subject: %s", f.Subject))
+		} else if f.Title != "" {
+			emailParts = append(emailParts, fmt.Sprintf("Subject: %s", f.Title))
+		}
+
+		if len(emailParts) > 0 {
+			parts = append(parts, "Email, "+strings.Join(emailParts, ", "))
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func richTextBlockToText(rtb *slack.RichTextBlock) string {
+	var parts []string
+
+	for _, elem := range rtb.Elements {
+		if t := richTextElementToText(elem); t != "" {
+			parts = append(parts, t)
+		}
+	}
+
+	return strings.Join(parts, " ")
+}
+
+func richTextElementToText(elem slack.RichTextElement) string {
+	switch e := elem.(type) {
+	case *slack.RichTextSection:
+		return richTextSectionToText(e)
+	case *slack.RichTextList:
+		var parts []string
+		for _, listElem := range e.Elements {
+			if t := richTextElementToText(listElem); t != "" {
+				parts = append(parts, t)
+			}
+		}
+		return strings.Join(parts, " ")
+	case *slack.RichTextQuote:
+		return richTextSectionToText((*slack.RichTextSection)(e))
+	case *slack.RichTextPreformatted:
+		return richTextSectionToText(&e.RichTextSection)
+	}
+	return ""
+}
+
+func formatEmailUser(u slack.EmailFileUserInfo) string {
+	addr := strings.ReplaceAll(u.Address, "@", " at ")
+	if u.Name != "" && addr != "" {
+		return u.Name + " - " + addr
+	} else if u.Name != "" {
+		return u.Name
+	} else if addr != "" {
+		return addr
+	}
+	return ""
+}
+
+func richTextSectionToText(section *slack.RichTextSection) string {
+	var parts []string
+
+	for _, elem := range section.Elements {
+		switch e := elem.(type) {
+		case *slack.RichTextSectionTextElement:
+			if e.Text != "" {
+				parts = append(parts, e.Text)
+			}
+		case *slack.RichTextSectionLinkElement:
+			if e.Text != "" {
+				parts = append(parts, e.Text)
+			} else if e.URL != "" {
+				parts = append(parts, e.URL)
+			}
+		case *slack.RichTextSectionBroadcastElement:
+			if e.Range != "" {
+				parts = append(parts, "@"+e.Range)
+			}
+		}
+	}
+
+	return strings.Join(parts, "")
 }
 
 func AttachmentsTo2CSV(msgText string, attachments []slack.Attachment) string {
@@ -174,9 +342,11 @@ func TimestampToIsoRFC3339(slackTS string) (string, error) {
 }
 
 func ProcessText(s string) string {
-	s = filterSpecialChars(s)
+	s = normalizeLinks(s)
+	s = stripUnsafeRunes(s)
+	s = collapseInlineSpaces(s)
 
-	return s
+	return strings.TrimSpace(s)
 }
 
 func HumanizeCertificates(certs []*x509.Certificate) string {
@@ -192,28 +362,14 @@ func HumanizeCertificates(certs []*x509.Certificate) string {
 	return strings.Join(descriptions, ", ")
 }
 
-func filterSpecialChars(text string) string {
-	replaceWithCommaCheck := func(match []string, isLast bool) string {
-		var url, linkText string
+var (
+	slackLinkRegex    = regexp.MustCompile(`<(https?://[^>|]+)\|([^>]+)>`)
+	markdownLinkRegex = regexp.MustCompile(`\[([^\]]+)\]\((https?://[^)]+)\)`)
+	htmlLinkRegex     = regexp.MustCompile(`<a\s+href=["']([^"']+)["'][^>]*>([^<]+)</a>`)
+	inlineSpaceRegex  = regexp.MustCompile(`[ \t]+`)
+)
 
-		if len(match) == 3 && strings.Contains(match[0], "|") {
-			url = match[1]
-			linkText = match[2]
-		} else if len(match) == 3 {
-			linkText = match[1]
-			url = match[2]
-		}
-
-		replacement := url + " - " + linkText
-
-		if !isLast {
-			replacement += ","
-		}
-
-		return replacement
-	}
-
-	// Helper function to check if this is the last link/element
+func normalizeLinks(text string) string {
 	isLastInText := func(original string, currentText string) bool {
 		linkPos := strings.LastIndex(currentText, original)
 		if linkPos == -1 {
@@ -223,60 +379,64 @@ func filterSpecialChars(text string) string {
 		return afterLink == ""
 	}
 
-	// Handle Slack-style links: <URL|Description>
-	slackLinkRegex := regexp.MustCompile(`<(https?://[^>|]+)\|([^>]+)>`)
-	slackMatches := slackLinkRegex.FindAllStringSubmatch(text, -1)
-	for _, match := range slackMatches {
-		original := match[0]
-		isLast := isLastInText(original, text)
-		replacement := replaceWithCommaCheck(match, isLast)
-		text = strings.Replace(text, original, replacement, 1)
-	}
-
-	// Handle markdown links: [Description](URL)
-	markdownLinkRegex := regexp.MustCompile(`\[([^\]]+)\]\((https?://[^)]+)\)`)
-	markdownMatches := markdownLinkRegex.FindAllStringSubmatch(text, -1)
-	for _, match := range markdownMatches {
-		original := match[0]
-		isLast := isLastInText(original, text)
-		replacement := replaceWithCommaCheck(match, isLast)
-		text = strings.Replace(text, original, replacement, 1)
-	}
-
-	htmlLinkRegex := regexp.MustCompile(`<a\s+href=["']([^"']+)["'][^>]*>([^<]+)</a>`)
-	htmlMatches := htmlLinkRegex.FindAllStringSubmatch(text, -1)
-	for _, match := range htmlMatches {
-		original := match[0]
-		isLast := isLastInText(original, text)
-		url := match[1]
-		linkText := match[2]
-		replacement := url + " - " + linkText
+	render := func(url, linkText string, isLast bool) string {
+		out := url + " - " + linkText
 		if !isLast {
-			replacement += ","
+			out += ","
 		}
-		text = strings.Replace(text, original, replacement, 1)
+		return out
 	}
 
-	urlRegex := regexp.MustCompile(`https?://[^\s<>"{}|\\^` + "`" + `\[\]]+`)
-	urls := urlRegex.FindAllString(text, -1)
-
-	protected := text
-	for i, url := range urls {
-		placeholder := "___URL_PLACEHOLDER_" + string(rune(48+i)) + "___"
-		protected = strings.Replace(protected, url, placeholder, 1)
+	for _, match := range slackLinkRegex.FindAllStringSubmatch(text, -1) {
+		original := match[0]
+		text = strings.Replace(text, original, render(match[1], match[2], isLastInText(original, text)), 1)
 	}
 
-	cleanRegex := regexp.MustCompile(`[^0-9\p{L}\p{M}\s\.\,\-_:/\?=&%]`)
-	cleaned := cleanRegex.ReplaceAllString(protected, "")
-
-	// Restore the URLs
-	for i, url := range urls {
-		placeholder := "___URL_PLACEHOLDER_" + string(rune(48+i)) + "___"
-		cleaned = strings.Replace(cleaned, placeholder, url, 1)
+	for _, match := range markdownLinkRegex.FindAllStringSubmatch(text, -1) {
+		original := match[0]
+		text = strings.Replace(text, original, render(match[2], match[1], isLastInText(original, text)), 1)
 	}
 
-	spaceRegex := regexp.MustCompile(`[ \t]+`)
-	cleaned = spaceRegex.ReplaceAllString(cleaned, " ")
+	for _, match := range htmlLinkRegex.FindAllStringSubmatch(text, -1) {
+		original := match[0]
+		text = strings.Replace(text, original, render(match[1], match[2], isLastInText(original, text)), 1)
+	}
 
-	return strings.TrimSpace(cleaned)
+	return text
+}
+
+// stripUnsafeRunes removes runes that are display-corrupting or carry no
+// semantic content: C0/C1 controls (except \t \n \r), DEL, BOM, ZWSP,
+// LRM/RLM, bidi overrides, and bidi isolates. Bidi overrides are a known
+// prompt-injection vector in chat corpora. U+200C (ZWNJ) and U+200D (ZWJ)
+// are preserved: they are required for Persian and Arabic letter joining
+// and for emoji ZWJ sequences such as family and flag emoji.
+func stripUnsafeRunes(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '\t' || r == '\n' || r == '\r':
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7F:
+			continue
+		case r >= 0x80 && r <= 0x9F:
+			continue
+		case r == 0xFEFF:
+			continue
+		case r == 0x200B, r == 0x200E, r == 0x200F: // ZWSP, LRM, RLM; U+200C ZWNJ and U+200D ZWJ preserved
+			continue
+		case r >= 0x202A && r <= 0x202E:
+			continue
+		case r >= 0x2066 && r <= 0x2069:
+			continue
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func collapseInlineSpaces(s string) string {
+	return inlineSpaceRegex.ReplaceAllString(s, " ")
 }
