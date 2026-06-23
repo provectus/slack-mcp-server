@@ -351,7 +351,7 @@ func setupMCPClientServer(t *testing.T, opts []server.ServerOption, toolHandler 
 	return c
 }
 
-func TestIntegrationErrorRecoveryMiddleware(t *testing.T) {
+func TestUnitErrorRecoveryMiddleware(t *testing.T) {
 	logger := zap.NewNop()
 
 	t.Run("handler error is converted to isError tool result", func(t *testing.T) {
