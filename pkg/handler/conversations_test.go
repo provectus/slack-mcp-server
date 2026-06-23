@@ -23,6 +23,8 @@ import (
 )
 
 func TestIntegrationConversations(t *testing.T) {
+	skipWithoutIntegrationEnv(t, "SLACK_MCP_XOXP_TOKEN", "SLACK_MCP_OPENAI_API", "NGROK_AUTH_TOKEN")
+
 	sseKey := uuid.New().String()
 	require.NotEmpty(t, sseKey, "sseKey must be generated for integration tests")
 	apiKey := os.Getenv("SLACK_MCP_OPENAI_API")

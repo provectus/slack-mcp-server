@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/csv"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -28,8 +29,23 @@ type matchingRule struct {
 	csvFieldValueRE string
 }
 
+// skipWithoutIntegrationEnv skips the calling test when any required secret is
+// absent, so the integration suite is a no-op (rather than a failure) in
+// environments without live Slack/OpenAI/ngrok credentials, e.g. CI without
+// the secrets configured.
+func skipWithoutIntegrationEnv(t *testing.T, vars ...string) {
+	t.Helper()
+	for _, v := range vars {
+		if os.Getenv(v) == "" {
+			t.Skipf("integration test skipped: %s not set", v)
+		}
+	}
+}
+
 func setupTestEnv(t *testing.T) (*testEnv, func()) {
 	t.Helper()
+
+	skipWithoutIntegrationEnv(t, "SLACK_MCP_XOXP_TOKEN", "NGROK_AUTH_TOKEN")
 
 	sseKey := uuid.New().String()
 	require.NotEmpty(t, sseKey, "sseKey must be generated for integration tests")
