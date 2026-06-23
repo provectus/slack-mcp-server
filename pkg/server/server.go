@@ -402,22 +402,6 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 		), conversationsHandler.ConversationsUnreadsHandler)
 	}
 
-	// Register mark tool - marks a channel as read
-	if shouldAddTool(ToolConversationsMark, enabledTools, "") {
-		s.AddTool(mcp.NewTool(ToolConversationsMark,
-			mcp.WithDescription("Mark a channel or DM as read. If no timestamp is provided, marks all messages as read."),
-			mcp.WithTitleAnnotation("Mark as Read"),
-			mcp.WithDestructiveHintAnnotation(false),
-			mcp.WithString("channel_id",
-				mcp.Required(),
-				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... (e.g., #general, @username)."),
-			),
-			mcp.WithString("ts",
-				mcp.Description("Timestamp of the message to mark as read up to. If not provided, marks all messages as read."),
-			),
-		), conversationsHandler.ConversationsMarkHandler)
-	}
-
 	if shouldAddTool(ToolConversationsLeave, enabledTools, "") {
 		s.AddTool(mcp.NewTool(ToolConversationsLeave,
 			mcp.WithDescription("Leave a channel, group conversation, or DM. Cannot leave the #general channel."),
