@@ -1,9 +1,16 @@
+# Live end-to-end tests: they launch the real server against the real Slack
+# workspace (SLACK_MCP_XOXP_TOKEN), drive it through OpenAI's hosted Responses
+# API as a remote MCP client (SLACK_MCP_OPENAI_API), exposed via an ngrok tunnel
+# (NGROK_AUTH_TOKEN). They cannot run without those three secrets, so they are
+# intentionally NOT triggered on pull requests — the PR lane stays secret-free
+# (unit tests + Trivy + CodeQL cover the offline logic). They run on pushes to
+# master (where secrets are configured) and on manual dispatch. When the secrets
+# are absent the tests t.Skip() rather than fail.
 name: Integration Tests
 on:
   push:
     branches:
       - master
-  pull_request_target:
   workflow_dispatch:
 
 permissions:
