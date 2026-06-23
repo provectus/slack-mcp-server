@@ -10,6 +10,7 @@ import (
 
 	"github.com/gocarina/gocsv"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
+	"github.com/slack-go/slack"
 	"github.com/korotovsky/slack-mcp-server/pkg/server/auth"
 	"github.com/korotovsky/slack-mcp-server/pkg/text"
 	"github.com/mark3labs/mcp-go/mcp"
@@ -135,12 +136,16 @@ func (ch *ChannelsHandler) ChannelsHandler(ctx context.Context, request mcp.Call
 	types := request.GetString("channel_types", provider.PubChanType)
 	cursor := request.GetString("cursor", "")
 	limit := request.GetInt("limit", 0)
+	query := request.GetString("query", "")
+	queryTargets := request.GetString("query_targets", "name")
 
 	ch.logger.Debug("Request parameters",
 		zap.String("sort", sortType),
 		zap.String("channel_types", types),
 		zap.String("cursor", cursor),
 		zap.Int("limit", limit),
+		zap.String("query", query),
+		zap.String("query_targets", queryTargets),
 	)
 
 	// MCP Inspector v0.14.0 has issues with Slice type
@@ -182,6 +187,26 @@ func (ch *ChannelsHandler) ChannelsHandler(ctx context.Context, request mcp.Call
 
 	channels := filterChannelsByTypes(allChannels, channelTypes)
 	ch.logger.Debug("Channels after filtering by type", zap.Int("count", len(channels)))
+
+	if query != "" {
+		validTargets := map[string]bool{"name": true, "topic": true, "purpose": true}
+		targetSet := make(map[string]bool)
+		for _, t := range strings.Split(queryTargets, ",") {
+			t = strings.TrimSpace(strings.ToLower(t))
+			if validTargets[t] {
+				targetSet[t] = true
+			} else if t != "" {
+				ch.logger.Warn("Invalid query target ignored", zap.String("target", t))
+			}
+		}
+		if len(targetSet) == 0 {
+			ch.logger.Debug("No valid query targets provided, using default (name)")
+			targetSet["name"] = true
+		}
+
+		channels = filterChannelsByQuery(channels, query, targetSet)
+		ch.logger.Debug("Channels after keyword filter", zap.Int("count", len(channels)))
+	}
 
 	var chans []provider.Channel
 
@@ -234,6 +259,102 @@ func (ch *ChannelsHandler) ChannelsHandler(ctx context.Context, request mcp.Call
 	return mcp.NewToolResultText(string(csvBytes)), nil
 }
 
+func (ch *ChannelsHandler) ChannelsMeHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ChannelsMeHandler called")
+
+	types := request.GetString("channel_types", "public_channel,private_channel")
+	cursor := request.GetString("cursor", "")
+	limit := request.GetInt("limit", 0)
+
+	if limit == 0 {
+		limit = 100
+	}
+	if limit > 999 {
+		limit = 999
+	}
+
+	channelTypes := []string{}
+	for _, t := range strings.Split(types, ",") {
+		t = strings.TrimSpace(t)
+		if ch.validTypes[t] {
+			channelTypes = append(channelTypes, t)
+		}
+	}
+	if len(channelTypes) == 0 {
+		channelTypes = []string{provider.PubChanType, provider.PrivateChanType}
+	}
+
+	// Fetch channels via the Slack API, stopping as soon as we have enough
+	// results and using the API's native cursor for pagination. This avoids
+	// fetching every channel the user belongs to on large workspaces.
+	usersMap := ch.apiProvider.ProvideUsersMap().Users
+	var allChannels []provider.Channel
+	var apiCursor string
+	var slackNextCursor string
+
+	if cursor != "" {
+		apiCursor = cursor
+	}
+
+	for {
+		params := &slack.GetConversationsForUserParameters{
+			Types:           channelTypes,
+			Limit:           200,
+			Cursor:          apiCursor,
+			ExcludeArchived: true,
+		}
+		channels, nextCursor, err := ch.apiProvider.Slack().GetConversationsForUserContext(ctx, params)
+		if err != nil {
+			ch.logger.Error("Failed to fetch user conversations", zap.Error(err))
+			return nil, fmt.Errorf("failed to fetch your channels: %v", err)
+		}
+
+		for _, c := range channels {
+			allChannels = append(allChannels, provider.MapChannelFromSlack(c, usersMap))
+		}
+
+		// Early exit: stop paginating through the Slack API once we have enough.
+		if len(allChannels) >= limit {
+			slackNextCursor = nextCursor
+			break
+		}
+
+		if nextCursor == "" {
+			break
+		}
+		apiCursor = nextCursor
+	}
+
+	ch.logger.Debug("Fetched member channels", zap.Int("count", len(allChannels)))
+
+	// Truncate to limit and use the Slack API cursor.
+	end := limit
+	if end > len(allChannels) {
+		end = len(allChannels)
+	}
+	var channelList []Channel
+	for _, channel := range allChannels[:end] {
+		channelList = append(channelList, Channel{
+			ID:          channel.ID,
+			Name:        channel.Name,
+			Topic:       channel.Topic,
+			Purpose:     channel.Purpose,
+			MemberCount: channel.MemberCount,
+		})
+	}
+
+	if len(channelList) > 0 && slackNextCursor != "" {
+		channelList[len(channelList)-1].Cursor = slackNextCursor
+	}
+
+	csvBytes, err := gocsv.MarshalBytes(&channelList)
+	if err != nil {
+		return nil, err
+	}
+
+	return mcp.NewToolResultText(string(csvBytes)), nil
+}
+
 func filterChannelsByTypes(channels map[string]provider.Channel, types []string) []provider.Channel {
 	logger := zap.L()
 
@@ -277,6 +398,19 @@ func filterChannelsByTypes(channels map[string]provider.Channel, types []string)
 		zap.Int("mpims", mpimCount),
 	)
 
+	return result
+}
+
+func filterChannelsByQuery(channels []provider.Channel, query string, targetSet map[string]bool) []provider.Channel {
+	q := strings.ToLower(query)
+	var result []provider.Channel
+	for _, ch := range channels {
+		if (targetSet["name"] && strings.Contains(strings.ToLower(ch.Name), q)) ||
+			(targetSet["topic"] && strings.Contains(strings.ToLower(ch.Topic), q)) ||
+			(targetSet["purpose"] && strings.Contains(strings.ToLower(ch.Purpose), q)) {
+			result = append(result, ch)
+		}
+	}
 	return result
 }
 

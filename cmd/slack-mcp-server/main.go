@@ -23,10 +23,12 @@ var defaultSsePort = 13080
 func main() {
 	var transport string
 	var enabledToolsFlag string
+	var noCache bool
 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&transport, "transport", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = all tools)")
 	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = all tools)")
+	flag.BoolVar(&noCache, "no-cache", false, "Skip user/channel cache loading on startup for faster initialization. Lookups by #channel-name or @username will not work; use channel/user IDs instead.")
 	flag.Parse()
 
 	if enabledToolsFlag == "" {
@@ -69,15 +71,25 @@ func main() {
 	p := provider.New(transport, logger)
 	s := server.NewMCPServer(p, logger, enabledTools)
 
-	go func() {
-		var once sync.Once
+	if noCache {
+		p.SkipCache()
+		logger.Info("Cache loading disabled via --no-cache flag",
+			zap.String("context", "console"),
+		)
+	} else {
+		go func() {
+			var once sync.Once
 
-		newUsersWatcher(p, &once, logger)()
-		newChannelsWatcher(p, &once, logger)()
-	}()
+			newUsersWatcher(p, &once, logger)()
+			newChannelsWatcher(p, &once, logger)()
+		}()
+	}
 
 	switch transport {
 	case "stdio":
+		// Wait for caches to be ready before accepting stdio requests.
+		// With stale-while-revalidate this exits in one tick (~100ms).
+		// On cold start (no cache), this blocks until the initial fetch completes.
 		for {
 			if ready, _ := p.IsReady(); ready {
 				break

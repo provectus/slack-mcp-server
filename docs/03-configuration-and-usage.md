@@ -1,15 +1,5 @@
 ## 3. Configuration and Usage
 
-> **Maintainer note**
->
-> I’m currently seeking a new **full-time or contract engineering role** after losing my primary job.  
-> This directly impacts my ability to maintain this project long-term.
->
-> If you know a **Hiring Manager, Engineering Manager, or startup team** that might be a good fit, I’d be grateful for an introduction.
->
-> 👉 See the full context in **[this issue](https://github.com/korotovsky/slack-mcp-server/issues/150)**  
-> 📩 Contact: `dmitry@korotovsky.io`
-
 You can configure the MCP server using command line arguments and environment variables.
 
 ### Using DXT
@@ -261,7 +251,7 @@ docker-compose up -d
 | Argument                    | Required ? | Description                                                                                                                                                                                                         |
 |-----------------------------|------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `--transport` or `-t`       | Yes        | Select transport for the MCP Server, possible values are: `stdio`, `sse`                                                                                                                                            |
-| `--enabled-tools` or `-e`   | No         | Comma-separated list of tools to register. If not set, read-only tools are registered by default; write tools require their tool-specific env var (e.g., `SLACK_MCP_ADD_MESSAGE_TOOL`) or explicit listing in `SLACK_MCP_ENABLED_TOOLS`. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `conversations_mark`, `conversations_draft_message`. |
+| `--enabled-tools` or `-e`   | No         | Comma-separated list of tools to register. If not set, read-only tools and usergroups tools are registered by default; write tools require their tool-specific env var (e.g., `SLACK_MCP_ADD_MESSAGE_TOOL`) or explicit listing in `SLACK_MCP_ENABLED_TOOLS`. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `conversations_unreads`, `conversations_mark`, `conversations_draft_message`, `conversations_join`, `conversations_leave`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`, `saved_list`, `saved_update`, `saved_clear_completed`. |
 
 ### Environment Variables
 
@@ -285,8 +275,10 @@ docker-compose up -d
 | `SLACK_MCP_DRAFT_MESSAGE_TOOL`    | No        | `nil`                     | Enable native draft create/replace via `conversations_draft_message`: `true` for all channels, a comma-separated channel-ID whitelist, or `!Cxxxx` negation. Re-running the tool for a channel/thread that already has a draft replaces it in place instead of creating a duplicate. Requires a session token (`xoxc`/`xoxd`); not available with bot tokens. Drafts are saved to the user's Drafts and never auto-sent. |
 | `SLACK_MCP_USERS_CACHE`           | No        | `.users_cache.json`       | Path to the users cache file. Used to cache Slack user information to avoid repeated API calls on startup.                                                                                                                                                                                |
 | `SLACK_MCP_CHANNELS_CACHE`        | No        | `.channels_cache_v2.json` | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup.                                                                                                                                                                          |
+| `SLACK_MCP_CACHE_TTL`             | No        | `24h`                     | Cache time-to-live. Supports duration format (`24h`, `30m`) or seconds (`3600`). Set to `0` to disable TTL (cache forever). When the cache expires, stale data is served immediately while a background refresh fetches fresh data.                                                       |
+| `SLACK_MCP_MIN_REFRESH_INTERVAL`  | No        | `30s`                     | Minimum interval between forced cache refreshes. Prevents API abuse from repeated force-refresh requests. Supports duration format (`30s`, `1m`) or seconds (`60`). Set to `0` to disable rate limiting.                                                                                  |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
-| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_mark`, `conversations_draft_message`) require their specific env var to be set OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `conversations_mark`, `conversations_draft_message`. |
+| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_mark`, `conversations_draft_message`) require their specific env var to be set OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `conversations_unreads`, `conversations_mark`, `conversations_draft_message`, `conversations_join`, `conversations_leave`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`, `saved_list`, `saved_update`, `saved_clear_completed`. |
 
 ### Tool Registration and Permissions
 
@@ -301,6 +293,8 @@ Write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `
 2. Explicitly list them in `SLACK_MCP_ENABLED_TOOLS`
 
 `conversations_draft_message` additionally requires a session token (`xoxc`/`xoxd`) — it is not registered for bot tokens because it relies on Slack's edge API. Drafts it creates or replaces appear in Slack's **Drafts** list; open them from there. Due to a Slack desktop-client limitation, an API-created draft is not auto-attached to a channel's message composer (the composer only auto-shows drafts that client composed locally), even though the draft is saved and kept up to date.
+
+Usergroups tools (`usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`) are **registered by default**. They require appropriate OAuth scopes (`usergroups:read` for read operations, `usergroups:write` for write operations).
 
 #### Examples
 

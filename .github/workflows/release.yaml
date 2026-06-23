@@ -10,7 +10,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: 1.23
+  GO_VERSION: 1.25
   NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
 permissions:
@@ -39,7 +39,7 @@ jobs:
         run: make build-dxt
 
       - name: Upload artifacts
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           generate_release_notes: true
           make_latest: true
