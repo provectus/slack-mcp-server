@@ -23,7 +23,6 @@ import (
 	"github.com/korotovsky/slack-mcp-server/pkg/text"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/slack-go/slack"
-	slackGoUtil "github.com/takara2314/slack-go-util"
 	"go.uber.org/zap"
 )
 
@@ -247,13 +246,19 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 			options = append(options, slack.MsgOptionDisableMarkdown())
 			options = append(options, slack.MsgOptionText(params.text, false))
 		case "text/markdown":
-			blocks, err := slackGoUtil.ConvertMarkdownTextToBlocks(params.text)
+			// Render markdown to a rich_text block, the same converter the drafts
+			// path uses and the format Slack's native composer produces. Section
+			// blocks (the previous approach) render bold/links/lists less
+			// faithfully. params.text is also attached as the notification/fallback
+			// text, exactly like the raw-blocks branch above.
+			block, err := markdownToRichTextBlock(params.text)
 			if err != nil {
 				ch.logger.Warn("Markdown parsing error", zap.Error(err))
 				options = append(options, slack.MsgOptionDisableMarkdown())
 				options = append(options, slack.MsgOptionText(params.text, false))
 			} else {
-				options = append(options, slack.MsgOptionBlocks(blocks...))
+				options = append(options, slack.MsgOptionBlocks(block))
+				options = append(options, slack.MsgOptionText(params.text, false))
 			}
 		default:
 			return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")

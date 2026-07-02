@@ -32,13 +32,12 @@ func plainRichTextBlock(text string) *slack.RichTextBlock {
 
 // markdownToRichTextBlock converts markdown into a single Slack rich_text block.
 //
-// Slack's undocumented drafts.create endpoint only accepts rich_text blocks; it
-// silently drops section/header blocks. The shared ConvertMarkdownTextToBlocks
-// helper emits paragraphs as section blocks, so it cannot be used for drafts.
-// This converter emits paragraphs as rich_text_section elements, lists as
-// rich_text_list, fenced code as rich_text_preformatted and blockquotes as
-// rich_text_quote, all inside one rich_text block, preserving inline bold,
-// italic, inline-code and link styling.
+// It backs both posting (conversations_add_message) and Slack's undocumented
+// drafts.create endpoint, the latter of which only accepts rich_text blocks and
+// silently drops section/header blocks. The converter emits paragraphs as
+// rich_text_section elements, lists as rich_text_list, fenced code as
+// rich_text_preformatted and blockquotes as rich_text_quote, all inside one
+// rich_text block, preserving inline bold, italic, inline-code and link styling.
 func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	source := []byte(markdown)
 	doc := draftMD.Parser().Parse(gmtext.NewReader(source))
