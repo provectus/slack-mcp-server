@@ -74,6 +74,8 @@ Search messages in a public channel, private channel, or direct message (DM, or 
   - `filter_date_on` (string, optional): Filter messages sent on a specific date in format `YYYY-MM-DD`. Example: `2023-10-01`, `July`, `Yesterday` or `Today`. If not provided, all dates will be searched.
   - `filter_date_during` (string, optional): Filter messages sent during a specific period in format `YYYY-MM-DD`. Example: `July`, `Yesterday` or `Today`. If not provided, all dates will be searched.
   - `filter_threads_only` (boolean, default: false): If true, the response will include only messages from threads. Default is boolean false.
+  - `filter_has_reaction` (string, optional): Filter messages that have a specific emoji reaction from anyone. Accepts an emoji name with or without colons. Example: `eyes` or `:eyes:`. If not provided, messages are not filtered by reactions.
+  - `filter_my_reaction` (string, optional): Filter messages that have a specific emoji reaction added by you (the authenticated user). Accepts an emoji name with or without colons. Example: `pushpin` or `:pushpin:`. If not provided, messages are not filtered by your reactions.
   - `cursor` (string, default: ""): Cursor for pagination. Use the value of the last row and column in the response as next_cursor field returned from the previous request.
   - `limit` (number, default: 20): The maximum number of items to return. Must be an integer between 1 and 100.
 

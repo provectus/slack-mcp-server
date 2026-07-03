@@ -42,6 +42,8 @@ var validFilterKeys = map[string]struct{}{
 	"after":  {},
 	"on":     {},
 	"during": {},
+	"has":    {},
+	"hasmy":  {},
 }
 
 type Message struct {
@@ -2029,6 +2031,12 @@ func (ch *ConversationsHandler) parseParamsToolSearch(ctx context.Context, req m
 		}
 		addFilter(filters, "from", f)
 	}
+	if emoji := req.GetString("filter_has_reaction", ""); emoji != "" {
+		addFilter(filters, "has", normalizeEmojiFilter(emoji))
+	}
+	if emoji := req.GetString("filter_my_reaction", ""); emoji != "" {
+		addFilter(filters, "hasmy", normalizeEmojiFilter(emoji))
+	}
 
 	dateMap, err := buildDateFilters(
 		req.GetString("filter_date_before", ""),
@@ -2411,6 +2419,21 @@ func buildDateFilters(before, after, on, during string) (map[string]string, erro
 	return out, nil
 }
 
+// normalizeEmojiFilter converts an emoji name like "pushpin" or ":pushpin:"
+// to the ":pushpin:" form Slack search expects in has:/hasmy: modifiers.
+// Unicode emoji characters are passed through unchanged.
+func normalizeEmojiFilter(raw string) string {
+	name := strings.Trim(strings.TrimSpace(raw), ":")
+	for _, r := range name {
+		isName := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '_' || r == '-' || r == '+'
+		if !isName {
+			return strings.TrimSpace(raw)
+		}
+	}
+	return ":" + name + ":"
+}
+
 func isFilterKey(key string) bool {
 	_, ok := validFilterKeys[strings.ToLower(key)]
 	return ok
@@ -2442,7 +2465,7 @@ func addFilter(filters map[string][]string, key, val string) {
 func buildQuery(freeText []string, filters map[string][]string) string {
 	var out []string
 	out = append(out, freeText...)
-	for _, key := range []string{"is", "in", "from", "with", "before", "after", "on", "during"} {
+	for _, key := range []string{"is", "in", "from", "with", "before", "after", "on", "during", "has", "hasmy"} {
 		for _, val := range filters[key] {
 			out = append(out, fmt.Sprintf("%s:%s", key, val))
 		}
