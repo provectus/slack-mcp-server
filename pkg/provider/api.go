@@ -37,6 +37,7 @@ var PubChanType = "public_channel"
 var ErrUsersNotReady = errors.New(usersNotReadyMsg)
 var ErrChannelsNotReady = errors.New(channelsNotReadyMsg)
 var ErrRefreshRateLimited = errors.New("refresh skipped due to rate limiting")
+var ErrCountsUnavailable = errors.New("client counts unavailable, edge client is missing or the call failed")
 
 // atomicWriteFile writes data to a file atomically using a temp file and rename.
 // Uses os.CreateTemp for unpredictable temp file names (prevents symlink attacks)
@@ -1161,6 +1162,74 @@ func (ap *ApiProvider) refreshChannelsInternal(ctx context.Context, force bool) 
 	// No usable cache: fetch fresh data synchronously (first run or force)
 	ap.channelsMu.Unlock()
 	return ap.fetchAndStoreChannels(ctx)
+}
+
+// mergeChannelCounts returns a new snapshot with unread info (HasUnreads,
+// LastRead, MentionCount) from counts merged into snapshot's channels.
+// The input snapshot is not mutated.
+func mergeChannelCounts(snapshot *ChannelsCache, counts map[string]edge.ChannelSnapshot) *ChannelsCache {
+	merged := &ChannelsCache{
+		Channels:    make(map[string]Channel, len(snapshot.Channels)),
+		ChannelsInv: make(map[string]string, len(snapshot.ChannelsInv)),
+	}
+	for id, ch := range snapshot.Channels {
+		if snap, ok := counts[id]; ok {
+			ch.HasUnreads = snap.HasUnreads
+			ch.LastRead = snap.LastRead.SlackString()
+			ch.MentionCount = snap.MentionCount
+		}
+		merged.Channels[id] = ch
+	}
+	for name, id := range snapshot.ChannelsInv {
+		merged.ChannelsInv[name] = id
+	}
+	return merged
+}
+
+// channelsCacheExpired reports whether the channels cache file is older than
+// the configured TTL. A missing file counts as expired; TTL 0 disables expiry.
+func (ap *ApiProvider) channelsCacheExpired() bool {
+	if ap.cacheTTL <= 0 {
+		return false
+	}
+	fi, err := os.Stat(ap.channelsCachePath)
+	if err != nil {
+		return true
+	}
+	return time.Since(fi.ModTime()) > ap.cacheTTL
+}
+
+// RefreshChannelCounts refreshes only the unread counters (HasUnreads,
+// LastRead, MentionCount) of the current channels snapshot using a single
+// client.counts edge call, instead of re-listing every channel. The full
+// channel list is refreshed in the background only when the cache file has
+// passed its TTL. Returns ErrCountsUnavailable when counts cannot be fetched
+// (e.g. no edge client), so callers can fall back to ForceRefreshChannels.
+func (ap *ApiProvider) RefreshChannelCounts(ctx context.Context) error {
+	if ap.channelsSnapshot.Load() == nil {
+		return ErrCountsUnavailable
+	}
+
+	counts := ap.fetchChannelCounts(ctx)
+	if counts == nil {
+		return ErrCountsUnavailable
+	}
+
+	// Re-load under lock so a concurrent full refresh is not clobbered with
+	// a merge based on an older snapshot.
+	ap.channelsMu.Lock()
+	snapshot := ap.channelsSnapshot.Load()
+	if snapshot != nil {
+		ap.channelsSnapshot.Store(mergeChannelCounts(snapshot, counts))
+	}
+	ap.channelsMu.Unlock()
+	ap.logger.Info("Merged fresh unread counts into channels snapshot",
+		zap.Int("counts", len(counts)))
+
+	if ap.channelsCacheExpired() {
+		ap.spawnBackgroundChannelsRefresh()
+	}
+	return nil
 }
 
 // spawnBackgroundChannelsRefresh starts a background goroutine to fetch fresh channel data.
