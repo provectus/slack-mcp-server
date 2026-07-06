@@ -121,13 +121,24 @@ func (ch *ChannelsHandler) ChannelsHandler(ctx context.Context, request mcp.Call
 	}
 
 	if request.GetBool("refresh_cache", false) {
-		ch.logger.Info("Forced channels cache refresh requested")
-		if err := ch.apiProvider.ForceRefreshChannels(ctx); err != nil {
-			if errors.Is(err, provider.ErrRefreshRateLimited) {
-				ch.logger.Warn("Channels cache refresh was rate-limited, returning cached data")
-			} else {
-				ch.logger.Error("Failed to refresh channels cache", zap.Error(err))
-				return nil, fmt.Errorf("failed to refresh channels cache: %w", err)
+		ch.logger.Info("Channels cache refresh requested")
+		// Fast path: refresh only unread counters via a single client.counts
+		// call; the full channel re-list happens in the background when the
+		// cache TTL expires. Falls back to a full synchronous refresh when
+		// counts are unavailable (e.g. no edge client).
+		if err := ch.apiProvider.RefreshChannelCounts(ctx); err != nil {
+			if !errors.Is(err, provider.ErrCountsUnavailable) {
+				ch.logger.Error("Failed to refresh channel counts", zap.Error(err))
+				return nil, fmt.Errorf("failed to refresh channel counts: %w", err)
+			}
+			ch.logger.Info("Client counts unavailable, falling back to full channels refresh")
+			if err := ch.apiProvider.ForceRefreshChannels(ctx); err != nil {
+				if errors.Is(err, provider.ErrRefreshRateLimited) {
+					ch.logger.Warn("Channels cache refresh was rate-limited, returning cached data")
+				} else {
+					ch.logger.Error("Failed to refresh channels cache", zap.Error(err))
+					return nil, fmt.Errorf("failed to refresh channels cache: %w", err)
+				}
 			}
 		}
 	}

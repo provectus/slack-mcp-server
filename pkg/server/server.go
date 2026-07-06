@@ -454,7 +454,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("Cursor for pagination. Use the value of the last row and column in the response as next_cursor field returned from the previous request."),
 			),
 			mcp.WithBoolean("refresh_cache",
-				mcp.Description("If true, forces a refresh of the channels cache from Slack API before returning results. Rate-limited to once per 30 seconds. Default is false."),
+				mcp.Description("If true, refreshes unread counters (has_unreads, last_read, mention_count) from Slack before returning results; the full channel list is re-fetched in the background only when the cache TTL has expired. Default is false."),
 				mcp.DefaultBool(false),
 			),
 			mcp.WithString("query",
