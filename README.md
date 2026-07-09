@@ -14,12 +14,12 @@ This feature-rich Slack MCP Server has:
 - **Channel and Thread Support with `#Name` `@Lookup`**: Fetch messages from channels and threads, including activity messages, and retrieve channels using their names (e.g., #general) as well as their IDs.
 - **Smart History**: Fetch messages with pagination by date (d1, 7d, 1m) or message count.
 - **Unread Messages**: Get all unread messages across channels efficiently with priority sorting (DMs > partner channels > internal), @mention filtering, and mark-as-read support.
-- **Search Messages**: Search messages in channels, threads, and DMs using various filters like date, user, and content.
-- **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions.
+- **Search Messages**: Search messages in channels, threads, and DMs using various filters like date, user, content, and emoji reactions (`has:`/`hasmy:`).
+- **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions. Markdown payloads render as native Slack `rich_text` formatting.
 - **Native Drafts**: The `conversations_draft_message` tool creates or replaces Slack drafts (saved to your Drafts, never auto-sent). Re-running it for the same channel/thread updates the existing draft in place rather than piling up duplicates. Disabled by default; enable via `SLACK_MCP_DRAFT_MESSAGE_TOOL`. Requires a session token (`xoxc`/`xoxd`).
 - **DM and Group DM support**: Retrieve direct messages and group direct messages.
 - **Embedded user information**: Embed user information in messages, for better context.
-- **Cache support**: Cache users and channels for faster access.
+- **Cache support**: Cache users and channels for faster access, isolated per workspace (`TeamID`-prefixed) with a configurable TTL and background refresh that merges fresh channel counts instead of re-listing everything.
 - **Stdio/SSE/HTTP Transports & Proxy Support**: Use the server with any MCP client that supports Stdio, SSE or HTTP transports, and configure it to route outgoing requests through a proxy if needed.
 
 ### Analytics Demo
@@ -29,6 +29,45 @@ This feature-rich Slack MCP Server has:
 ### Add Message Demo
 
 ![Add Message](images/feature-2.gif)
+
+## Comparison with the hosted Slack connector
+
+Claude clients (Claude Code, claude.ai, Claude Desktop) can also reach Slack through Anthropic's **hosted Slack connector** — an OAuth Slack app that Anthropic operates on your behalf. This project takes a different route: you run the Go binary yourself with your own tokens (browser-session `xoxc`/`xoxd` "stealth" mode, or `xoxp`/`xoxb`). Nothing has to be installed or approved in your workspace, and your data never leaves the machine the server runs on.
+
+The two overlap on the basics but specialize in different directions: this server leans into workspace management and personal-workflow tooling (unreads, mark-as-read, saved items, user groups, join/leave, reaction-based search), while the hosted connector leans into collaboration primitives (canvases, scheduled messages, channel-member listing, emoji search).
+
+### Feature support
+
+| Capability | This server (`slack-mcp-server`) | Hosted Slack connector |
+|---|---|---|
+| Read channel history | ✅ `conversations_history` | ✅ |
+| Read thread replies | ✅ `conversations_replies` | ✅ |
+| Search messages | ✅ `conversations_search_messages` (incl. `has:`/`hasmy:` reaction filters) | ✅ |
+| List / search channels | ✅ `channels_list`, `channels_me` | ✅ |
+| Search users | ✅ `users_search` | ✅ |
+| List channel members | ❌ | ✅ |
+| Unread messages | ✅ `conversations_unreads` | ❌ |
+| Mark as read | ✅ `conversations_mark` | ❌ |
+| Join / leave channel | ✅ `conversations_join` / `conversations_leave` | ❌ |
+| Post message | ✅ `conversations_add_message` (off by default) | ✅ |
+| Draft message | ✅ `conversations_draft_message` (needs `xoxc`/`xoxd`) | ✅ |
+| Schedule message | ❌ | ✅ |
+| Reactions | ✅ add / remove (`reactions_add`, `reactions_remove`) | ✅ add + read |
+| Saved / "Save for Later" | ✅ `saved_list` / `saved_update` / `saved_clear_completed` | ❌ |
+| User groups management | ✅ `usergroups_*` | ❌ |
+| Canvas read / create / update | ❌ | ✅ |
+| Emoji search | ❌ | ✅ |
+
+### How each caches Slack data
+
+| Aspect | This server | Hosted Slack connector |
+|---|---|---|
+| Model | Persistent on-disk cache of users and channels | No user-managed cache; queries the Slack Web API live |
+| What is cached | User and channel directories, used to resolve `@userHandle` ↔ ID and `#channel-name` ↔ ID and to enrich messages with author context | n/a |
+| Location | `users_cache.json` / `channels_cache_v2.json` under the OS cache dir, **prefixed with the workspace `TeamID`** so multiple workspaces stay isolated | n/a |
+| Freshness | 24h TTL by default (`SLACK_MCP_CACHE_TTL`), refreshed in the background with a minimum interval between forced refreshes (`SLACK_MCP_MIN_REFRESH_INTERVAL`); channel refreshes merge fresh member counts instead of re-listing every channel | Handled server-side by Anthropic |
+
+Without the local cache, name-based lookups (`@user`, `#channel`) and `channels_list` do not work — see the [Limitations matrix & Cache](#limitations-matrix--cache) below.
 
 ## Tools
 
@@ -327,6 +366,8 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_MARK_TOOL`             | No        | `nil`                     | Enable the `conversations_mark` tool by setting to `true` or `1`. Disabled by default to prevent accidental marking of messages as read.                                                                                                                                                  |
 | `SLACK_MCP_USERS_CACHE`           | No        | `~/Library/Caches/slack-mcp-server/users_cache.json` (macOS)<br>`~/.cache/slack-mcp-server/users_cache.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/users_cache.json` (Windows) | Path to the users cache file. Used to cache Slack user information to avoid repeated API calls on startup. |
 | `SLACK_MCP_CHANNELS_CACHE`        | No        | `~/Library/Caches/slack-mcp-server/channels_cache_v2.json` (macOS)<br>`~/.cache/slack-mcp-server/channels_cache_v2.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channels_cache_v2.json` (Windows) | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup. |
+| `SLACK_MCP_CACHE_TTL`             | No        | `24h`                     | How long cached users/channels stay fresh before a background refresh is triggered. Accepts Go durations (`1h`, `30m`), a plain number of seconds (`3600`), or `0` to disable the TTL and cache forever. Negative values are rejected and fall back to the default.                        |
+| `SLACK_MCP_MIN_REFRESH_INTERVAL`  | No        | `30s`                     | Minimum interval between forced cache refreshes. Throttles back-to-back refresh requests; a refresh skipped by this guard returns `ErrRefreshRateLimited`. Accepts Go durations (`30s`, `1m`), a number of seconds (`60`), or `0` to disable rate limiting. Negative values fall back to the default. |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
 | `SLACK_MCP_GOVSLACK`              | No        | `nil`                     | Set to `true` to enable [GovSlack](https://slack.com/solutions/govslack) mode. Routes API calls to `slack-gov.com` endpoints instead of `slack.com` for FedRAMP-compliant government workspaces.                                                                                          |
 | `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_mark`, `conversations_draft_message`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `conversations_unreads`, `conversations_mark`, `conversations_draft_message`, `conversations_join`, `conversations_leave`, `channels_list`, `channels_me`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`, `users_search`, `saved_list`, `saved_update`, `saved_clear_completed`. |
