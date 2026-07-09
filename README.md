@@ -392,6 +392,16 @@ npx @modelcontextprotocol/inspector go run mcp/mcp-server.go --transport stdio
 tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
 ```
 
+### Running as a macOS background service (LaunchAgent)
+
+To keep the server running on the SSE transport and start it automatically at login, this repo ships a launchd setup:
+
+- `com.slack-mcp-server.plist` — LaunchAgent definition
+- `run-with-tokens.sh` — wrapper that loads tokens from `~/.ssh/slack_tokens`, builds the binary if needed, and launches the server with `-t sse`
+- [`SLACK_TOKENS_SETUP.md`](SLACK_TOKENS_SETUP.md) — how to create the `~/.ssh/slack_tokens` file and install the LaunchAgent
+
+Tokens live in `~/.ssh/slack_tokens` (secured with `chmod 600`) rather than in the plist. Once installed, the server listens on `http://127.0.0.1:13080/sse`. See [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) for the full walkthrough.
+
 ## Security
 
 - Never share API tokens
