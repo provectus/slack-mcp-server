@@ -45,7 +45,7 @@ The two overlap on the basics but specialize in different directions: this serve
 | Search messages | ✅ `conversations_search_messages` (incl. `has:`/`hasmy:` reaction filters) | ✅ |
 | List / search channels | ✅ `channels_list`, `channels_me` | ✅ |
 | Search users | ✅ `users_search` | ✅ |
-| List channel members | ❌ | ✅ |
+| List channel members | ✅ `channels_members` | ✅ |
 | Unread messages | ✅ `conversations_unreads` | ❌ |
 | Mark as read | ✅ `conversations_mark` | ❌ |
 | Join / leave channel | ✅ `conversations_join` / `conversations_leave` | ❌ |
@@ -126,6 +126,14 @@ Get list of channels
   - `sort` (string, optional): Type of sorting. Allowed values: `popularity` - sort by number of members/participants in each channel.
   - `limit` (number, default: 100): The maximum number of items to return. Must be an integer between 1 and 1000 (maximum 999).
   - `cursor` (string, optional): Cursor for pagination. Use the value of the last row and column in the response as next_cursor field returned from the previous request.
+
+### 6. channels_members:
+Get the complete member roster of a channel by channel_id. Names are resolved from the users cache so display and real names match the rest of the product; a member not yet known locally is still included by ID with blank names. The response is CSV with columns `UserID`, `DisplayName`, `RealName`.
+- **Parameters:**
+  - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
+  - `exclude_bots` (boolean, default: false): If true, bot users are omitted from the roster.
+  - `exclude_deactivated` (boolean, default: false): If true, deactivated (deleted) users are omitted from the roster.
+  - `refresh_cache` (boolean, default: false): If true, force a refresh of the channel's member roster from Slack before returning it.
 
 ### 6. reactions_add:
 Add an emoji reaction to a message in a public channel, private channel, or direct message (DM, or IM) conversation.
@@ -366,6 +374,7 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_MARK_TOOL`             | No        | `nil`                     | Enable the `conversations_mark` tool by setting to `true` or `1`. Disabled by default to prevent accidental marking of messages as read.                                                                                                                                                  |
 | `SLACK_MCP_USERS_CACHE`           | No        | `~/Library/Caches/slack-mcp-server/users_cache.json` (macOS)<br>`~/.cache/slack-mcp-server/users_cache.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/users_cache.json` (Windows) | Path to the users cache file. Used to cache Slack user information to avoid repeated API calls on startup. |
 | `SLACK_MCP_CHANNELS_CACHE`        | No        | `~/Library/Caches/slack-mcp-server/channels_cache_v2.json` (macOS)<br>`~/.cache/slack-mcp-server/channels_cache_v2.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channels_cache_v2.json` (Windows) | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup. |
+| `SLACK_MCP_CHANNEL_MEMBERS_CACHE` | No        | `~/Library/Caches/slack-mcp-server/channel_members_cache.json` (macOS)<br>`~/.cache/slack-mcp-server/channel_members_cache.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channel_members_cache.json` (Windows) | Path to the channel members cache file. Used to cache each channel's member roster per workspace to avoid repeated API calls on startup. |
 | `SLACK_MCP_CACHE_TTL`             | No        | `24h`                     | How long cached users/channels stay fresh before a background refresh is triggered. Accepts Go durations (`1h`, `30m`), a plain number of seconds (`3600`), or `0` to disable the TTL and cache forever. Negative values are rejected and fall back to the default.                        |
 | `SLACK_MCP_MIN_REFRESH_INTERVAL`  | No        | `30s`                     | Minimum interval between forced cache refreshes. Throttles back-to-back refresh requests; a refresh skipped by this guard returns `ErrRefreshRateLimited`. Accepts Go durations (`30s`, `1m`), a number of seconds (`60`), or `0` to disable rate limiting. Negative values fall back to the default. |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |

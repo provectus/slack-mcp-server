@@ -224,6 +224,15 @@ func newChannelsWatcher(p *provider.ApiProvider, once *sync.Once, logger *zap.Lo
 			)
 		}
 
+		// Load persisted channel-member rosters from disk (no Slack call) so
+		// they survive a restart; individual rosters refresh lazily on read.
+		if err := p.RefreshChannelMembers(context.Background()); err != nil {
+			logger.Warn("Failed to load channel members cache on boot",
+				zap.String("context", "console"),
+				zap.Error(err),
+			)
+		}
+
 		ready, _ := p.IsReady()
 		if ready {
 			once.Do(func() {

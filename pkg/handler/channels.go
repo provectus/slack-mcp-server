@@ -366,6 +366,91 @@ func (ch *ChannelsHandler) ChannelsMeHandler(ctx context.Context, request mcp.Ca
 	return mcp.NewToolResultText(string(csvBytes)), nil
 }
 
+type ChannelMember struct {
+	UserID      string `csv:"UserID"`
+	DisplayName string `csv:"DisplayName"`
+	RealName    string `csv:"RealName"`
+}
+
+func (ch *ChannelsHandler) ChannelsMembersHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	ch.logger.Debug("ChannelsMembersHandler called")
+
+	// Needs users (name resolution) and channels (#name/@name lookup) ready.
+	if ready, err := ch.apiProvider.IsReady(); !ready {
+		ch.logger.Error("API provider not ready", zap.Error(err))
+		return nil, err
+	}
+
+	channelRef := request.GetString("channel_id", "")
+	if channelRef == "" {
+		return mcp.NewToolResultError("channel_id must be provided"), nil
+	}
+
+	channelID, err := resolveChannelID(ctx, ch.apiProvider, ch.logger, channelRef)
+	if err != nil {
+		ch.logger.Warn("Channel not found for members request",
+			zap.String("channel", channelRef), zap.Error(err))
+		return mcp.NewToolResultText(err.Error()), nil
+	}
+
+	if request.GetBool("refresh_cache", false) {
+		ch.logger.Info("Channel members cache refresh requested", zap.String("channel_id", channelID))
+		if _, err := ch.apiProvider.ForceRefreshChannelMembers(ctx, channelID); err != nil {
+			if errors.Is(err, provider.ErrRefreshRateLimited) {
+				ch.logger.Warn("Channel members cache refresh was rate-limited, returning cached data",
+					zap.String("channel_id", channelID))
+			} else {
+				ch.logger.Error("Failed to refresh channel members cache", zap.Error(err))
+				return nil, fmt.Errorf("failed to refresh channel members cache: %w", err)
+			}
+		}
+	}
+
+	memberIDs, err := ch.apiProvider.GetChannelMembers(ctx, channelID)
+	if err != nil {
+		if errors.Is(err, provider.ErrChannelMembersNotReady) {
+			return mcp.NewToolResultText(provider.ErrChannelMembersNotReady.Error()), nil
+		}
+		ch.logger.Error("Failed to get channel members", zap.String("channel_id", channelID), zap.Error(err))
+		return nil, fmt.Errorf("failed to get channel members: %w", err)
+	}
+
+	excludeBots := request.GetBool("exclude_bots", false)
+	excludeDeactivated := request.GetBool("exclude_deactivated", false)
+
+	usersMap := ch.apiProvider.ProvideUsersMap().Users
+
+	var members []ChannelMember
+	for _, id := range memberIDs {
+		user, known := usersMap[id]
+		if known {
+			if excludeBots && user.IsBot {
+				continue
+			}
+			if excludeDeactivated && user.Deleted {
+				continue
+			}
+		}
+
+		// A member absent from the users snapshot is still included by ID with
+		// blank names; no extra API calls to resolve it.
+		member := ChannelMember{UserID: id}
+		if known {
+			member.DisplayName = user.Profile.DisplayName
+			member.RealName = user.RealName
+		}
+		members = append(members, member)
+	}
+
+	csvBytes, err := gocsv.MarshalBytes(&members)
+	if err != nil {
+		ch.logger.Error("Failed to marshal channel members to CSV", zap.Error(err))
+		return nil, err
+	}
+
+	return mcp.NewToolResultText(string(csvBytes)), nil
+}
+
 func filterChannelsByTypes(channels map[string]provider.Channel, types []string) []provider.Channel {
 	logger := zap.L()
 

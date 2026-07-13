@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -12,16 +13,55 @@ import (
 	"go.uber.org/zap"
 )
 
-// mockSlackClient implements just enough of SlackAPI for PatchUser tests.
+// scriptedMembers is one scripted response for the mock's
+// GetUsersInConversationContext: either a page of member IDs or an error.
+type scriptedMembers struct {
+	ids []string
+	err error
+}
+
+// mockSlackClient implements just enough of SlackAPI for PatchUser and
+// channel-member tests.
 type mockSlackClient struct {
 	SlackAPI // embed interface to satisfy all methods; only override what we need
 
 	usersInfoResult *[]slack.User
 	usersInfoErr    error
+
+	// Scriptable conversations.members responses for channel-member tests.
+	// Each call to GetUsersInConversationContext consumes the next entry in
+	// order; once the script is exhausted the last entry repeats. Guarded by
+	// membersMu so a background-refresh goroutine can call it concurrently with
+	// the test reading the call counter.
+	membersMu     sync.Mutex
+	membersCalls  int
+	membersScript []scriptedMembers
 }
 
 func (m *mockSlackClient) GetUsersInfo(users ...string) (*[]slack.User, error) {
 	return m.usersInfoResult, m.usersInfoErr
+}
+
+func (m *mockSlackClient) GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error) {
+	m.membersMu.Lock()
+	defer m.membersMu.Unlock()
+	idx := m.membersCalls
+	m.membersCalls++
+	if len(m.membersScript) == 0 {
+		return nil, "", nil
+	}
+	if idx >= len(m.membersScript) {
+		idx = len(m.membersScript) - 1
+	}
+	r := m.membersScript[idx]
+	return r.ids, "", r.err
+}
+
+// membersCallCount returns how many times GetUsersInConversationContext ran.
+func (m *mockSlackClient) membersCallCount() int {
+	m.membersMu.Lock()
+	defer m.membersMu.Unlock()
+	return m.membersCalls
 }
 
 func newTestApiProvider(client SlackAPI, snapshot *UsersCache) *ApiProvider {

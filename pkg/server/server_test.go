@@ -108,6 +108,7 @@ func TestValidToolNames(t *testing.T) {
 			ToolConversationsJoin:           true,
 			ToolChannelsList:                true,
 			ToolChannelsMe:                  true,
+			ToolChannelsMembers:             true,
 			ToolUsergroupsList:              true,
 			ToolUsergroupsMe:                true,
 			ToolUsergroupsCreate:            true,
@@ -141,6 +142,7 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "conversations_join", ToolConversationsJoin)
 		assert.Equal(t, "channels_list", ToolChannelsList)
 		assert.Equal(t, "channels_me", ToolChannelsMe)
+		assert.Equal(t, "channels_members", ToolChannelsMembers)
 		assert.Equal(t, "usergroups_list", ToolUsergroupsList)
 		assert.Equal(t, "usergroups_me", ToolUsergroupsMe)
 		assert.Equal(t, "usergroups_create", ToolUsergroupsCreate)

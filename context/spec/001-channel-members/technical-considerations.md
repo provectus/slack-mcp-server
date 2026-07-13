@@ -1,7 +1,7 @@
 # Technical Specification: List Channel Members
 
 - **Functional Specification:** [functional-spec.md](./functional-spec.md)
-- **Status:** Draft
+- **Status:** Completed
 - **Author(s):** AWOS implement-feature flow (drafted with the `go-mcp-backend` specialist)
 
 ---
