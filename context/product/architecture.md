@@ -15,9 +15,10 @@ A self-hosted Model Context Protocol (MCP) server, written in Go, that gives any
 
 ## 2. Data & Persistence
 
-- **Data Store:** No database or ORM. Persistence is an on-disk JSON file cache of workspace users and channels, purpose-built to keep AI tool calls fast.
+- **Data Store:** No database or ORM. Persistence is a set of on-disk JSON file caches — workspace users, channels, and per-channel member rosters — purpose-built to keep AI tool calls fast.
 - **Isolation & Integrity:** Cache files live under `os.UserCacheDir()/slack-mcp-server/`, namespaced by Slack TeamID for multi-workspace isolation, and are written atomically via temp-file rename.
-- **Freshness:** Configurable TTL (`SLACK_MCP_CACHE_TTL`, default 24h) with background refresh; per-file overrides (`SLACK_MCP_USERS_CACHE`, `SLACK_MCP_CHANNELS_CACHE`) and a `--no-cache` bypass.
+- **Cache Tiers:** Three tiers share the same snapshot/refresh machinery. Users and channels are each a single workspace-wide snapshot. The **channel-members** tier is a per-channel roster map (`channelID → {memberIDs, fetchedAt}`) held in one workspace file, populated lazily per channel on first request, with a per-channel in-flight guard so concurrent first-time requests don't duplicate the fetch. Member names and bot/deactivated status are resolved from the users snapshot at read time.
+- **Freshness:** Configurable TTL (`SLACK_MCP_CACHE_TTL`, default 24h) with background refresh. Users and channels expire by cache-file age; the channel-members tier expires **per entry** by each roster's own `fetchedAt`, so channels refresh independently. Per-file overrides: `SLACK_MCP_USERS_CACHE`, `SLACK_MCP_CHANNELS_CACHE`, `SLACK_MCP_CHANNEL_MEMBERS_CACHE`; `--no-cache` bypass.
 
 ---
 

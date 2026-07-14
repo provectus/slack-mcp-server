@@ -18,6 +18,7 @@ import (
 	"github.com/korotovsky/slack-mcp-server/pkg/limiter"
 	"github.com/korotovsky/slack-mcp-server/pkg/provider/edge"
 	"github.com/korotovsky/slack-mcp-server/pkg/transport"
+	edgeslack "github.com/rusq/slack"
 	"github.com/rusq/slackdump/v3/auth"
 	"github.com/slack-go/slack"
 	"go.uber.org/zap"
@@ -26,6 +27,7 @@ import (
 
 const usersNotReadyMsg = "users cache is not ready yet, sync process is still running... please wait"
 const channelsNotReadyMsg = "channels cache is not ready yet, sync process is still running... please wait"
+const channelMembersNotReadyMsg = "channel members cache is not ready yet, sync process is still running... please wait"
 const defaultUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 const defaultCacheTTL = 24 * time.Hour
 const defaultMinRefreshInterval = 30 * time.Second
@@ -36,6 +38,7 @@ var PubChanType = "public_channel"
 
 var ErrUsersNotReady = errors.New(usersNotReadyMsg)
 var ErrChannelsNotReady = errors.New(channelsNotReadyMsg)
+var ErrChannelMembersNotReady = errors.New(channelMembersNotReadyMsg)
 var ErrRefreshRateLimited = errors.New("refresh skipped due to rate limiting")
 var ErrCountsUnavailable = errors.New("client counts unavailable, edge client is missing or the call failed")
 
@@ -196,6 +199,15 @@ type ChannelsCache struct {
 	ChannelsInv map[string]string  `json:"channels_inv"`
 }
 
+type ChannelMemberRoster struct {
+	MemberIDs []string  `json:"member_ids"`
+	FetchedAt time.Time `json:"fetched_at"`
+}
+
+type ChannelMembersCache struct {
+	Channels map[string]ChannelMemberRoster `json:"channels"` // keyed by channel ID
+}
+
 type Channel struct {
 	ID           string   `json:"id"`
 	Name         string   `json:"name"`
@@ -246,6 +258,9 @@ type SlackAPI interface {
 	// For xoxp tokens this is more efficient than conversations.list because it excludes
 	// non-member public channels and closed DMs that cannot have unreads.
 	GetConversationsForUserContext(ctx context.Context, params *slack.GetConversationsForUserParameters) ([]slack.Channel, string, error)
+
+	// Used to get the complete member roster of a channel (conversations.members).
+	GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error)
 
 	// Edge API methods
 	ClientUserBoot(ctx context.Context) (*edge.ClientUserBootResponse, error)
@@ -307,6 +322,16 @@ type ApiProvider struct {
 	lastForcedChannelsRefresh time.Time
 	channelsMu                sync.RWMutex // protects lastForcedChannelsRefresh
 	fetchChannelsMu           sync.Mutex   // serializes fetchAndStoreChannels calls
+
+	// Channel members cache: atomic pointer to immutable snapshot (no copy on read).
+	// Rosters are per-channel, so the in-flight guard and forced-refresh throttle
+	// are keyed by channel ID rather than a single atomic.Bool / time.Time.
+	membersSnapshot          atomic.Pointer[ChannelMembersCache]
+	membersCachePath         string
+	refreshingMembers        sync.Map             // channelID -> struct{}: per-channel in-flight gather guard
+	lastForcedMembersRefresh map[string]time.Time // per-channel forced-refresh throttle
+	membersMu                sync.RWMutex         // protects lastForcedMembersRefresh + snapshot swaps
+	fetchMembersMu           sync.Mutex           // serializes disk writes
 }
 
 func NewMCPSlackClient(authProvider auth.Provider, logger *zap.Logger) (*MCPSlackClient, error) {
@@ -526,6 +551,35 @@ func (c *MCPSlackClient) GetConversationsForUserContext(ctx context.Context, par
 	return c.slackClient.GetConversationsForUserContext(ctx, params)
 }
 
+// GetUsersInConversationContext returns a single page of a channel's member
+// roster plus the next-page cursor. It follows the same edge-first-then-standard
+// dispatch as GetConversationsContext: for Enterprise Grid + session tokens it
+// uses the edge client (which returns the full member list in one shot via
+// UsersList, hence an empty next cursor), falling back to the standard client on
+// error. The standard-client path returns exactly one conversations.members page
+// and its cursor. Pagination is driven by the caller (fetchAndStoreChannelMembers)
+// so each page can be individually rate-limited and retried, resuming from the
+// current cursor on a 429 rather than restarting the whole gather.
+func (c *MCPSlackClient) GetUsersInConversationContext(ctx context.Context, params *slack.GetUsersInConversationParameters) ([]string, string, error) {
+	if c.isEnterprise && !c.isOAuth && !c.edgeFailed {
+		// Enterprise Grid + session tokens: use edge API, which returns the full
+		// member list in one shot (no pagination needed). The edge client uses
+		// the rusq/slack fork's param type; only ChannelID is consumed.
+		ids, _, err := c.edgeClient.GetUsersInConversationContext(ctx, &edgeslack.GetUsersInConversationParameters{
+			ChannelID: params.ChannelID,
+		})
+		if err == nil {
+			return ids, "", nil
+		}
+		c.edgeFailed = true
+		// Fall back to standard API below.
+	}
+
+	// Standard client: return a single conversations.members page and its
+	// next-cursor. The caller loops on the cursor, so no internal pagination here.
+	return c.slackClient.GetUsersInConversationContext(ctx, params)
+}
+
 func (c *MCPSlackClient) GetConversationHistoryContext(ctx context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
 	return c.slackClient.GetConversationHistoryContext(ctx, params)
 }
@@ -732,6 +786,11 @@ func newWithXOXP(transport string, authProvider auth.ValueAuth, logger *zap.Logg
 		channelsCache = getCachePathWithTeamID(teamID, "channels_cache_v2.json")
 	}
 
+	channelMembersCache := os.Getenv("SLACK_MCP_CHANNEL_MEMBERS_CACHE")
+	if channelMembersCache == "" {
+		channelMembersCache = getCachePathWithTeamID(teamID, "channel_members_cache.json")
+	}
+
 	if os.Getenv("SLACK_MCP_XOXP_TOKEN") == "demo" || (os.Getenv("SLACK_MCP_XOXC_TOKEN") == "demo" && os.Getenv("SLACK_MCP_XOXD_TOKEN") == "demo") {
 		logger.Info("Demo credentials are set, skip.")
 	} else {
@@ -752,6 +811,9 @@ func newWithXOXP(transport string, authProvider auth.ValueAuth, logger *zap.Logg
 
 		usersCachePath:    usersCache,
 		channelsCachePath: channelsCache,
+		membersCachePath:  channelMembersCache,
+
+		lastForcedMembersRefresh: make(map[string]time.Time),
 	}
 	// Initialize with empty snapshots
 	ap.usersSnapshot.Store(&UsersCache{
@@ -761,6 +823,9 @@ func newWithXOXP(transport string, authProvider auth.ValueAuth, logger *zap.Logg
 	ap.channelsSnapshot.Store(&ChannelsCache{
 		Channels:    make(map[string]Channel),
 		ChannelsInv: make(map[string]string),
+	})
+	ap.membersSnapshot.Store(&ChannelMembersCache{
+		Channels: map[string]ChannelMemberRoster{},
 	})
 	return ap
 }
@@ -792,6 +857,11 @@ func newWithXOXC(transport string, authProvider auth.ValueAuth, logger *zap.Logg
 		channelsCache = getCachePathWithTeamID(teamID, "channels_cache_v2.json")
 	}
 
+	channelMembersCache := os.Getenv("SLACK_MCP_CHANNEL_MEMBERS_CACHE")
+	if channelMembersCache == "" {
+		channelMembersCache = getCachePathWithTeamID(teamID, "channel_members_cache.json")
+	}
+
 	if os.Getenv("SLACK_MCP_XOXP_TOKEN") == "demo" || (os.Getenv("SLACK_MCP_XOXC_TOKEN") == "demo" && os.Getenv("SLACK_MCP_XOXD_TOKEN") == "demo") {
 		logger.Info("Demo credentials are set, skip.")
 	} else {
@@ -812,6 +882,9 @@ func newWithXOXC(transport string, authProvider auth.ValueAuth, logger *zap.Logg
 
 		usersCachePath:    usersCache,
 		channelsCachePath: channelsCache,
+		membersCachePath:  channelMembersCache,
+
+		lastForcedMembersRefresh: make(map[string]time.Time),
 	}
 	// Initialize with empty snapshots
 	ap.usersSnapshot.Store(&UsersCache{
@@ -821,6 +894,9 @@ func newWithXOXC(transport string, authProvider auth.ValueAuth, logger *zap.Logg
 	ap.channelsSnapshot.Store(&ChannelsCache{
 		Channels:    make(map[string]Channel),
 		ChannelsInv: make(map[string]string),
+	})
+	ap.membersSnapshot.Store(&ChannelMembersCache{
+		Channels: map[string]ChannelMemberRoster{},
 	})
 	return ap
 }
@@ -1281,6 +1357,214 @@ func (ap *ApiProvider) fetchAndStoreChannels(ctx context.Context) error {
 	ap.channelsReady.Store(true)
 
 	return nil
+}
+
+// RefreshChannelMembers loads the per-channel member-roster cache from disk on
+// boot. Unlike RefreshUsers/RefreshChannels it makes no Slack call — rosters are
+// fetched lazily per channel on first read. A missing (or unreadable/corrupt)
+// cache file is not an error: the empty snapshot seeded by the constructor is
+// kept so the server still boots.
+func (ap *ApiProvider) RefreshChannelMembers(ctx context.Context) error {
+	data, err := os.ReadFile(ap.membersCachePath)
+	if err != nil {
+		ap.logger.Info("No channel members cache to load, starting empty",
+			zap.String("cache_file", ap.membersCachePath))
+		return nil
+	}
+
+	var cached ChannelMembersCache
+	if err := json.Unmarshal(data, &cached); err != nil {
+		ap.logger.Warn("Failed to unmarshal channel members cache, starting empty",
+			zap.String("cache_file", ap.membersCachePath),
+			zap.Error(err))
+		return nil
+	}
+	if cached.Channels == nil {
+		cached.Channels = map[string]ChannelMemberRoster{}
+	}
+	ap.membersSnapshot.Store(&cached)
+	ap.logger.Info("Loaded channel members from cache",
+		zap.Int("channels", len(cached.Channels)),
+		zap.String("cache_file", ap.membersCachePath))
+	return nil
+}
+
+// GetChannelMembers returns the complete member roster for a single channel.
+//   - Snapshot hit within the per-entry TTL (or TTL disabled) → serve from cache,
+//     no Slack call.
+//   - Snapshot hit but the entry has aged past the TTL → serve the stale IDs and
+//     spawn a background refresh for this channel (serve-stale).
+//   - Entry absent and a gather for this channel is already in flight → return
+//     ErrChannelMembersNotReady so the caller waits instead of duplicating work.
+//   - Entry absent → fetch synchronously so the first caller gets the roster.
+func (ap *ApiProvider) GetChannelMembers(ctx context.Context, channelID string) ([]string, error) {
+	snapshot := ap.membersSnapshot.Load()
+	if roster, ok := snapshot.Channels[channelID]; ok {
+		// TTL <= 0 disables expiry (cache forever), matching users/channels.
+		if ap.cacheTTL <= 0 || time.Since(roster.FetchedAt) <= ap.cacheTTL {
+			return roster.MemberIDs, nil
+		}
+
+		// Expired: serve stale IDs and refresh in the background.
+		ap.logger.Info("Serving stale channel members, background refresh starting",
+			zap.String("channel_id", channelID),
+			zap.Duration("age", time.Since(roster.FetchedAt)),
+			zap.Duration("ttl", ap.cacheTTL))
+		ap.spawnBackgroundMembersRefresh(channelID)
+		return roster.MemberIDs, nil
+	}
+
+	// Entry absent. Atomically claim the per-channel in-flight guard: if a
+	// gather for this channel is already running, tell the caller to wait
+	// rather than launching a duplicate synchronous fetch. This mirrors the
+	// LoadOrStore guard in spawnBackgroundMembersRefresh and makes the
+	// "still preparing" path reachable for concurrent first-time callers
+	// (the loser of the race gets ErrChannelMembersNotReady). ForceRefresh
+	// deliberately bypasses this guard (it uses its own per-channel throttle).
+	if _, loaded := ap.refreshingMembers.LoadOrStore(channelID, struct{}{}); loaded {
+		return nil, ErrChannelMembersNotReady
+	}
+	defer ap.refreshingMembers.Delete(channelID)
+
+	// First run for this channel: fetch synchronously so the caller receives
+	// the complete roster immediately.
+	return ap.fetchAndStoreChannelMembers(ctx, channelID)
+}
+
+// ForceRefreshChannelMembers bypasses the cache and re-fetches a channel's
+// members from Slack. Throttled per channel by SLACK_MCP_MIN_REFRESH_INTERVAL
+// (default 30s); returns ErrRefreshRateLimited if a forced refresh for this
+// channel happened within the window.
+func (ap *ApiProvider) ForceRefreshChannelMembers(ctx context.Context, channelID string) ([]string, error) {
+	if ap.minRefreshInterval > 0 {
+		// Single lock scope for check-and-update to prevent a TOCTOU race.
+		ap.membersMu.Lock()
+		sinceLast := time.Since(ap.lastForcedMembersRefresh[channelID])
+		if sinceLast < ap.minRefreshInterval {
+			ap.membersMu.Unlock()
+			ap.logger.Debug("Skipping forced channel members refresh, within rate limit",
+				zap.String("channel_id", channelID),
+				zap.Duration("since_last", sinceLast),
+				zap.Duration("min_interval", ap.minRefreshInterval))
+			return nil, ErrRefreshRateLimited
+		}
+		// Record the timestamp before refreshing to block concurrent forced refreshes.
+		ap.lastForcedMembersRefresh[channelID] = time.Now()
+		ap.membersMu.Unlock()
+	}
+
+	ap.logger.Info("Force refreshing channel members cache",
+		zap.String("channel_id", channelID))
+	return ap.fetchAndStoreChannelMembers(ctx, channelID)
+}
+
+// spawnBackgroundMembersRefresh starts a background goroutine to re-fetch a
+// single channel's roster. refreshingMembers.LoadOrStore acts as the per-channel
+// CAS guard so at most one background gather runs per channel at a time.
+func (ap *ApiProvider) spawnBackgroundMembersRefresh(channelID string) {
+	if _, loaded := ap.refreshingMembers.LoadOrStore(channelID, struct{}{}); loaded {
+		ap.logger.Debug("Skipping background channel members refresh, already in progress",
+			zap.String("channel_id", channelID))
+		return
+	}
+	go func() {
+		defer ap.refreshingMembers.Delete(channelID)
+		if _, err := ap.fetchAndStoreChannelMembers(context.Background(), channelID); err != nil {
+			ap.logger.Warn("Background channel members refresh failed, continuing with stale data",
+				zap.String("channel_id", channelID),
+				zap.Error(err))
+		}
+	}()
+}
+
+// channelMembersPage is one conversations.members page returned through the
+// rate-limited retry wrapper: the member IDs plus the next-page cursor.
+type channelMembersPage struct {
+	ids    []string
+	cursor string
+}
+
+// fetchAndStoreChannelMembers fetches a channel's complete member roster from
+// Slack, copy-on-writes a new ChannelMembersCache with this channel's entry
+// replaced, atomically persists the whole map, and returns the fetched IDs.
+// Each conversations.members page is routed through the shared rate limiter and
+// 429 retry individually, resuming from the current cursor on a retryable error
+// rather than restarting the gather (the edge path returns the whole roster in a
+// single page). An empty roster is valid (an empty channel legitimately has no
+// members) and is stored as-is. Serialized by fetchMembersMu so concurrent
+// fetches don't race on the snapshot swap / file write.
+func (ap *ApiProvider) fetchAndStoreChannelMembers(ctx context.Context, channelID string) ([]string, error) {
+	retryAfter := func(err error) time.Duration {
+		var rle *slack.RateLimitedError
+		if errors.As(err, &rle) {
+			return rle.RetryAfter
+		}
+		return 0
+	}
+
+	// Drive pagination here so every page passes through the shared limiter +
+	// 429 retry. On a retryable error CallWithRetry re-runs the current page
+	// (the cursor is unchanged), so a late-page 429 resumes instead of
+	// restarting from page 1.
+	var ids []string
+	cursor := ""
+	for {
+		page, err := limiter.CallWithRetry(ctx, ap.rateLimiter, 2, retryAfter,
+			func() (channelMembersPage, error) {
+				members, next, err := ap.client.GetUsersInConversationContext(ctx, &slack.GetUsersInConversationParameters{
+					ChannelID: channelID,
+					Limit:     1000,
+					Cursor:    cursor,
+				})
+				return channelMembersPage{ids: members, cursor: next}, err
+			})
+		if err != nil {
+			ap.logger.Error("Failed to fetch channel members",
+				zap.String("channel_id", channelID),
+				zap.Error(err))
+			return nil, err
+		}
+		ids = append(ids, page.ids...)
+		if page.cursor == "" {
+			break
+		}
+		cursor = page.cursor
+	}
+
+	roster := ChannelMemberRoster{
+		MemberIDs: ids,
+		FetchedAt: time.Now(),
+	}
+
+	ap.fetchMembersMu.Lock()
+	defer ap.fetchMembersMu.Unlock()
+
+	// Copy-on-write: build a fresh map from the current snapshot and replace this
+	// channel's entry. Never mutate the immutable snapshot — readers hold it lock-free.
+	current := ap.membersSnapshot.Load()
+	newCache := &ChannelMembersCache{
+		Channels: make(map[string]ChannelMemberRoster, len(current.Channels)+1),
+	}
+	for k, v := range current.Channels {
+		newCache.Channels[k] = v
+	}
+	newCache.Channels[channelID] = roster
+	ap.membersSnapshot.Store(newCache)
+
+	if data, err := json.MarshalIndent(newCache, "", "  "); err != nil {
+		ap.logger.Error("Failed to marshal channel members for cache", zap.Error(err))
+	} else if err := atomicWriteFile(ap.membersCachePath, data, 0600); err != nil {
+		ap.logger.Error("Failed to write channel members cache file",
+			zap.String("cache_file", ap.membersCachePath),
+			zap.Error(err))
+	} else {
+		ap.logger.Info("Wrote channel members to cache",
+			zap.String("channel_id", channelID),
+			zap.Int("count", len(ids)),
+			zap.String("cache_file", ap.membersCachePath))
+	}
+
+	return ids, nil
 }
 
 func (ap *ApiProvider) GetSlackConnect(ctx context.Context) ([]slack.User, error) {

@@ -108,7 +108,7 @@ The canonical project config every generated flow command checks against. Flow-a
 
 ## 10. Local Customizations
 
-- none
+- **Local-review reviewer agent is `pr-review-toolkit:code-reviewer`** (plugin-namespaced), not a bare `code-reviewer`. Observed during 001-channel-members: dispatching `code-reviewer` failed with "Agent type not found"; the installed agent carries the `pr-review-toolkit:` plugin prefix. `/implement-feature` Step 8 was corrected to name it. Preserve the prefix on any `/awos:flow` regeneration.
 
 ---
 

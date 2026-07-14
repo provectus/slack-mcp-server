@@ -1662,26 +1662,35 @@ func isDraftChannelAllowed(channel string) bool {
 }
 
 func (ch *ConversationsHandler) resolveChannelID(ctx context.Context, channel string) (string, error) {
+	return resolveChannelID(ctx, ch.apiProvider, ch.logger, channel)
+}
+
+// resolveChannelID resolves a channel reference (raw ID, or #name / @username_dm)
+// to a channel ID. #/@-prefixed refs are looked up via ChannelsInv with a single
+// ForceRefreshChannels retry on a miss; a still-missing ref returns a clear
+// "not found" error. Shared by ConversationsHandler and ChannelsHandler so the
+// two stay in lockstep.
+func resolveChannelID(ctx context.Context, apiProvider *provider.ApiProvider, logger *zap.Logger, channel string) (string, error) {
 	if !strings.HasPrefix(channel, "#") && !strings.HasPrefix(channel, "@") {
 		return channel, nil
 	}
 
 	// First attempt: try to resolve from current cache
-	channelsMaps := ch.apiProvider.ProvideChannelsMaps()
+	channelsMaps := apiProvider.ProvideChannelsMaps()
 	chn, ok := channelsMaps.ChannelsInv[channel]
 	if ok {
 		return channelsMaps.Channels[chn].ID, nil
 	}
 
 	// Channel not found - try refreshing cache and retry once
-	ch.logger.Debug("Channel not found in cache, attempting refresh",
+	logger.Debug("Channel not found in cache, attempting refresh",
 		zap.String("channel", channel))
 
-	refreshErr := ch.apiProvider.ForceRefreshChannels(ctx)
+	refreshErr := apiProvider.ForceRefreshChannels(ctx)
 	wasRateLimited := errors.Is(refreshErr, provider.ErrRefreshRateLimited)
 
 	if refreshErr != nil && !wasRateLimited {
-		ch.logger.Error("Failed to refresh channels cache",
+		logger.Error("Failed to refresh channels cache",
 			zap.String("channel", channel),
 			zap.Error(refreshErr))
 		return "", fmt.Errorf("channel %q not found and cache refresh failed: %w", channel, refreshErr)
@@ -1689,21 +1698,21 @@ func (ch *ConversationsHandler) resolveChannelID(ctx context.Context, channel st
 
 	// If rate-limited, cache wasn't refreshed - no point in a second lookup
 	if wasRateLimited {
-		ch.logger.Warn("Channel not found; cache refresh was rate-limited",
+		logger.Warn("Channel not found; cache refresh was rate-limited",
 			zap.String("channel", channel))
 		return "", fmt.Errorf("channel %q not found (cache refresh was rate-limited, try again later)", channel)
 	}
 
 	// Second attempt after successful refresh
-	channelsMaps = ch.apiProvider.ProvideChannelsMaps()
+	channelsMaps = apiProvider.ProvideChannelsMaps()
 	chn, ok = channelsMaps.ChannelsInv[channel]
 	if !ok {
-		ch.logger.Error("Channel not found even after cache refresh",
+		logger.Error("Channel not found even after cache refresh",
 			zap.String("channel", channel))
 		return "", fmt.Errorf("channel %q not found", channel)
 	}
 
-	ch.logger.Debug("Channel found after cache refresh",
+	logger.Debug("Channel found after cache refresh",
 		zap.String("channel", channel),
 		zap.String("channel_id", channelsMaps.Channels[chn].ID))
 

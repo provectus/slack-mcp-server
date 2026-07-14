@@ -118,7 +118,7 @@ Running the app to verify is the flow's job, not the user's. Nothing shared bloc
 
 First run the static gate: `make test` must be green (and `go fmt ./...` to keep the diff formatted). Then the AI review — it must stay independent of this conversation's authorship bias, so it never happens inline in the orchestrator's own window, which just drove the implementation:
 
-- Dispatch a dedicated **reviewer subagent** (`[Agent: code-reviewer]`, strongest tier) with this fixed verbatim prompt — do not add run-time focus areas drawn from what you implemented; the author framing the review is the bias:
+- Dispatch a dedicated **reviewer subagent** (`[Agent: pr-review-toolkit:code-reviewer]`, strongest tier) with this fixed verbatim prompt — do not add run-time focus areas drawn from what you implemented; the author framing the review is the bias:
 
   > Review the diff `git diff fork/master...HEAD` for the feature specified in `context/spec/{SPEC_NAME}/functional-spec.md` and `technical-considerations.md`. This is a Go MCP server (`github.com/mark3labs/mcp-go`) using the `slack-go` Web API and a custom edge client, with token capability-gating, a JSON file cache, tiered rate limiting, and zap logging. Check correctness against the spec's acceptance criteria, token-mode capability gating, error handling and 429/retry behavior, cache freshness/isolation, and Go idiom. Write all findings to `context/spec/{SPEC_NAME}/review.md`, most-severe first. Return only the verdict, the finding count by severity, and that file's path — never the full review body.
 

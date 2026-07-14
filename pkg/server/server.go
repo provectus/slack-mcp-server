@@ -39,6 +39,7 @@ const (
 	ToolConversationsJoin           = "conversations_join"
 	ToolChannelsList                = "channels_list"
 	ToolChannelsMe                  = "channels_me"
+	ToolChannelsMembers             = "channels_members"
 	ToolUsergroupsList              = "usergroups_list"
 	ToolUsergroupsMe                = "usergroups_me"
 	ToolUsergroupsCreate            = "usergroups_create"
@@ -65,6 +66,7 @@ var ValidToolNames = []string{
 	ToolConversationsJoin,
 	ToolChannelsList,
 	ToolChannelsMe,
+	ToolChannelsMembers,
 	ToolUsergroupsList,
 	ToolUsergroupsMe,
 	ToolUsergroupsCreate,
@@ -483,6 +485,30 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("Cursor for pagination."),
 			),
 		), channelsHandler.ChannelsMeHandler)
+	}
+
+	if shouldAddTool(ToolChannelsMembers, enabledTools, "") {
+		s.AddTool(mcp.NewTool(ToolChannelsMembers,
+			mcp.WithDescription("List the complete member roster of a single channel identified by ID or name. Returns CSV with columns UserID, DisplayName, RealName for every member (the full roster, not a partial page). Names are resolved from the local users cache; a member not yet known locally still appears by ID with blank names. Use exclude_bots / exclude_deactivated to narrow the list to real, active people."),
+			mcp.WithTitleAnnotation("List Channel Members"),
+			mcp.WithReadOnlyHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithBoolean("exclude_bots",
+				mcp.Description("If true, omit bot users from the roster. Default is false."),
+				mcp.DefaultBool(false),
+			),
+			mcp.WithBoolean("exclude_deactivated",
+				mcp.Description("If true, omit deactivated (deleted) accounts from the roster. Default is false."),
+				mcp.DefaultBool(false),
+			),
+			mcp.WithBoolean("refresh_cache",
+				mcp.Description("If true, re-fetch this channel's members from Slack before returning (subject to a short refresh throttle). Default is false, which serves the cached roster."),
+				mcp.DefaultBool(false),
+			),
+		), channelsHandler.ChannelsMembersHandler)
 	}
 
 	// User groups tools

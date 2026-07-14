@@ -16,3 +16,4 @@
 /npm/slack-mcp-server/README.md
 docker-compose.release.yml
 /review
+context/spec/*/review.md

@@ -118,3 +118,16 @@ release: ## Create release tag. Usage: make tag TAG=v1.2.3
 	fi
 	git tag -a "$(TAG)" -m "Release $(TAG)"
 	git push origin "$(TAG)"
+
+LAUNCHD_LABEL := com.slack-mcp-server
+
+.PHONY: reinstall-service
+reinstall-service: build ## Rebuild the binary and restart the local macOS LaunchAgent
+	@if [ "$$(uname)" != "Darwin" ]; then \
+	  echo "reinstall-service is macOS-only (uses launchctl / LaunchAgent)."; exit 1; \
+	fi
+	@if ! launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; then \
+	  echo "LaunchAgent $(LAUNCHD_LABEL) is not installed. See the 'Running as a macOS background service' section in README.md for one-time setup, then re-run."; exit 1; \
+	fi
+	launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL)
+	@echo "Restarted $(LAUNCHD_LABEL) on the freshly built binary. Reconnect your MCP client to pick up tool changes."
