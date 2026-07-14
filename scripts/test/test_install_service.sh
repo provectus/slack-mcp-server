@@ -168,9 +168,18 @@ case_linux_service_render() {
   assert_contains "$UNIT" "WantedBy=default.target"
   assert_not_contains "$UNIT" "/path/to"
 
-  # unit passes systemd's own verifier when available (Linux CI; not macOS)
+  # unit passes systemd's own verifier when available (Linux CI; not macOS).
+  # Offline --user verify needs XDG_RUNTIME_DIR, which headless CI runners
+  # without a user session leave unset — point it at a sandbox dir so the
+  # verifier can initialize; bad units still fail verify under this mode.
   if command -v systemd-analyze >/dev/null 2>&1; then
-    systemd-analyze --user verify "$UNIT" || {
+    local xdg_rt="${XDG_RUNTIME_DIR:-}"
+    if [ -z "$xdg_rt" ]; then
+      xdg_rt="$WORK/xdg-runtime"
+      mkdir -p "$xdg_rt"
+      chmod 700 "$xdg_rt"
+    fi
+    XDG_RUNTIME_DIR="$xdg_rt" systemd-analyze --user verify "$UNIT" || {
       echo "ASSERT: systemd-analyze verify rejected the rendered unit"
       return 1
     }

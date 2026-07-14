@@ -65,6 +65,7 @@ EOF
 
 # detect_platform [os] [arch] — prints "<os>-<arch>" (darwin|linux, amd64|arm64).
 # Args default to uname output; overridable for tests. Unsupported -> stderr, rc 2.
+# shellcheck disable=SC2120  # args are passed by the test suite, not by this script
 detect_platform() {
   local os_raw="${1:-$(uname -s)}"
   local arch_raw="${2:-$(uname -m)}"
@@ -373,6 +374,7 @@ main() {
   fi
 
   local platform
+  # shellcheck disable=SC2119  # no args: use the real uname os/arch
   platform="$(detect_platform)" || return 2
 
   local release_url="${REPO_API_URL}/releases/latest"

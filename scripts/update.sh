@@ -118,6 +118,7 @@ resolve_path() {
 
 # detect_platform [os] [arch] — prints "<os>-<arch>" (darwin|linux, amd64|arm64).
 # Args default to uname output; overridable for tests. Unsupported -> stderr, rc 2.
+# shellcheck disable=SC2120  # args are passed by the test suite, not by this script
 detect_platform() {
   local os_raw="${1:-$(uname -s)}"
   local arch_raw="${2:-$(uname -m)}"
@@ -465,6 +466,7 @@ main() {
 
   # --- apply: download to same-dir staging, verify, probe, swap ----------
   local platform
+  # shellcheck disable=SC2119  # no args: use the real uname os/arch
   if ! platform="$(detect_platform)"; then
     die "cannot update on this platform"
   fi
