@@ -17,18 +17,12 @@ LD_FLAGS = -s -w \
 	-X '$(PACKAGE)/pkg/version.BinaryName=$(BINARY_NAME)'
 COMMON_BUILD_ARGS = -ldflags "$(LD_FLAGS)"
 
-NPM_VERSION = $(shell git describe --tags --always | sed 's/^v//' | cut -d- -f1)
 OSES = darwin linux windows
 ARCHS = amd64 arm64
 
 CLEAN_TARGETS :=
 CLEAN_TARGETS += '$(BINARY_NAME)'
 CLEAN_TARGETS += $(foreach os,$(OSES),$(foreach arch,$(ARCHS),./build/$(BINARY_NAME)-$(os)-$(arch)$(if $(findstring windows,$(os)),.exe,)))
-CLEAN_TARGETS += $(foreach os,$(OSES),$(foreach arch,$(ARCHS),./build/extension.dxt/server/$(BINARY_NAME)-$(os)-$(arch)))
-CLEAN_TARGETS += $(foreach os,$(OSES),$(foreach arch,$(ARCHS),./npm/$(BINARY_NAME)-$(os)-$(arch)/bin/))
-CLEAN_TARGETS += $(foreach os,$(OSES),$(foreach arch,$(ARCHS),./npm/$(BINARY_NAME)-$(os)-$(arch)/.npmrc))
-CLEAN_TARGETS += ./npm/slack-mcp-server/.npmrc ./npm/slack-mcp-server/LICENSE ./npm/slack-mcp-server/README.md build/extension.dxt/manifest.json build/extension.dxt/icon.png
-CLEAN_TARGETS += ./build/slack-mcp-server.dxt ./build/slack-mcp-server-$(NPM_VERSION).dxt
 
 # The help will print out all targets with their descriptions organized bellow their categories. The categories are represented by `##@` and the target descriptions by `##`.
 # The awk commands is responsible to read the entire set of makefiles included in this invocation, looking for lines of the file as xyz: ## something, and then pretty-format the target and help. Then, if there's a line with ##@ something, that gets pretty-printed as a category.
@@ -51,49 +45,10 @@ build: clean tidy format ## Build the project
 	go build $(COMMON_BUILD_ARGS) -o ./build/$(BINARY_NAME) ./cmd/slack-mcp-server
 
 .PHONY: build-all-platforms
-build-all-platforms: clean tidy format ## Build the project for all platforms
+build-all-platforms: clean ## Build the project for all platforms (release path: must not mutate the tree, or the stamped version gains -dirty)
 	$(foreach os,$(OSES),$(foreach arch,$(ARCHS), \
 		GOOS=$(os) GOARCH=$(arch) go build $(COMMON_BUILD_ARGS) -o ./build/$(BINARY_NAME)-$(os)-$(arch)$(if $(findstring windows,$(os)),.exe,) ./cmd/slack-mcp-server; \
 	))
-
-.PHONY: build-dxt
-build-dxt: ## Build DTX extension
-	$(foreach os,$(OSES),$(foreach arch,$(ARCHS), \
-		EXECUTABLE=$(BINARY_NAME)-$(os)-$(arch)$(if $(findstring windows,$(os)),.exe,); \
-		DIRNAME=$(BINARY_NAME)-$(os)-$(arch); \
-		cp ./build/$$EXECUTABLE ./build/extension.dxt/server/; \
-	))
-	cp npm/slack-mcp-server/bin/index.js ./build/extension.dxt/server/
-	cp images/icon.png ./build/extension.dxt/
-	jq '.version = "$(NPM_VERSION)"' ./manifest-dxt.json > tmp.json && mv tmp.json ./build/extension.dxt/manifest.json;
-	chmod +x build/extension.dxt/server/slack-mcp-server-*
-	dxt pack build/extension.dxt/ build/slack-mcp-server-${NPM_VERSION}.dxt
-	cp build/slack-mcp-server-${NPM_VERSION}.dxt build/slack-mcp-server.dxt
-
-.PHONY: npm-copy-binaries
-npm-copy-binaries: build-all-platforms ## Copy the binaries to each npm package
-	$(foreach os,$(OSES),$(foreach arch,$(ARCHS), \
-		EXECUTABLE=$(BINARY_NAME)-$(os)-$(arch)$(if $(findstring windows,$(os)),.exe,); \
-		DIRNAME=$(BINARY_NAME)-$(os)-$(arch); \
-		mkdir -p ./npm/$$DIRNAME/bin; \
-		cp ./build/$$EXECUTABLE ./npm/$$DIRNAME/bin/; \
-	))
-
-.PHONY: npm-publish
-npm-publish: npm-copy-binaries ## Publish the npm packages
-	$(foreach os,$(OSES),$(foreach arch,$(ARCHS), \
-		DIRNAME="$(BINARY_NAME)-$(os)-$(arch)"; \
-		cd npm/$$DIRNAME; \
-		echo '//registry.npmjs.org/:_authToken=$(NPM_TOKEN)' >> .npmrc; \
-		jq '.version = "$(NPM_VERSION)"' package.json > tmp.json && mv tmp.json package.json; \
-		npm publish; \
-		cd ../..; \
-	))
-	cp README.md LICENSE ./npm/slack-mcp-server/
-	echo '//registry.npmjs.org/:_authToken=$(NPM_TOKEN)' >> ./npm/slack-mcp-server/.npmrc
-	jq '.version = "$(NPM_VERSION)"' ./npm/slack-mcp-server/package.json > tmp.json && mv tmp.json ./npm/slack-mcp-server/package.json; \
-	jq '.optionalDependencies |= with_entries(.value = "$(NPM_VERSION)")' ./npm/slack-mcp-server/package.json > tmp.json && mv tmp.json ./npm/slack-mcp-server/package.json; \
-	cd npm/slack-mcp-server && npm publish
 
 .PHONY: deps
 deps: ## Download dependencies
@@ -112,12 +67,12 @@ tidy: ## Tidy up the go modules
 	$(GO) mod tidy
 
 .PHONY: release
-release: ## Create release tag. Usage: make tag TAG=v1.2.3
-	@if [ -z "$(TAG)" ]; then \
-	  echo "Usage: make tag TAG=vX.Y.Z"; exit 1; \
+release: ## Create release tag. Usage: make release TAG=pv-vX.Y.Z
+	@if ! echo "$(TAG)" | grep -Eq '^pv-v[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+	  echo "Usage: make release TAG=pv-vX.Y.Z (e.g. TAG=pv-v1.0.0)"; exit 1; \
 	fi
 	git tag -a "$(TAG)" -m "Release $(TAG)"
-	git push origin "$(TAG)"
+	git push fork "$(TAG)"
 
 LAUNCHD_LABEL := com.slack-mcp-server
 
@@ -127,7 +82,11 @@ reinstall-service: build ## Rebuild the binary and restart the local macOS Launc
 	  echo "reinstall-service is macOS-only (uses launchctl / LaunchAgent)."; exit 1; \
 	fi
 	@if ! launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; then \
-	  echo "LaunchAgent $(LAUNCHD_LABEL) is not installed. See the 'Running as a macOS background service' section in README.md for one-time setup, then re-run."; exit 1; \
+	  echo "LaunchAgent $(LAUNCHD_LABEL) is not installed. See the 'Running as a background service (launchd on macOS, systemd on Linux)' section in README.md for one-time setup, then re-run."; exit 1; \
 	fi
 	launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL)
 	@echo "Restarted $(LAUNCHD_LABEL) on the freshly built binary. Reconnect your MCP client to pick up tool changes."
+	@if [ -x "$$HOME/.local/bin/slack-mcp-server" ]; then \
+	  echo "Note: run-with-tokens.sh prefers ~/.local/bin/slack-mcp-server (curl install) over build/, so the service may NOT be running your fresh build."; \
+	  echo "To pin the repo build, set SLACK_MCP_BIN=$(CURDIR)/build/$(BINARY_NAME) in the plist env — or remove the ~/.local/bin copy."; \
+	fi

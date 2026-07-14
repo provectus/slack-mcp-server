@@ -1,7 +1,7 @@
 # Technical Specification: Agent-Friendly Install & Update
 
 - **Functional Specification:** [functional-spec.md](./functional-spec.md)
-- **Status:** Approved
+- **Status:** Completed
 - **Author(s):** Aleksandr Makarov (with release-infra specialist)
 
 ---

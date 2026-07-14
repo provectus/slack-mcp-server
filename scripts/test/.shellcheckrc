@@ -1,0 +1,4 @@
+# Let `shellcheck scripts/test/*.sh` follow `# shellcheck source=lib.sh`
+# directives relative to each script's own directory.
+external-sources=true
+source-path=SCRIPTDIR

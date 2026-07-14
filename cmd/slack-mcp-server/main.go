@@ -12,6 +12,7 @@ import (
 
 	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/server"
+	"github.com/korotovsky/slack-mcp-server/pkg/version"
 	"github.com/mattn/go-isatty"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -24,12 +25,19 @@ func main() {
 	var transport string
 	var enabledToolsFlag string
 	var noCache bool
+	var showVersion bool
 	flag.StringVar(&transport, "t", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&transport, "transport", "stdio", "Transport type (stdio, sse or http)")
 	flag.StringVar(&enabledToolsFlag, "e", "", "Comma-separated list of enabled tools (empty = all tools)")
 	flag.StringVar(&enabledToolsFlag, "enabled-tools", "", "Comma-separated list of enabled tools (empty = all tools)")
 	flag.BoolVar(&noCache, "no-cache", false, "Skip user/channel cache loading on startup for faster initialization. Lookups by #channel-name or @username will not work; use channel/user IDs instead.")
+	flag.BoolVar(&showVersion, "version", false, "Print version information and exit")
 	flag.Parse()
+
+	if showVersion {
+		fmt.Println(version.String())
+		os.Exit(0)
+	}
 
 	if enabledToolsFlag == "" {
 		enabledToolsFlag = os.Getenv("SLACK_MCP_ENABLED_TOOLS")

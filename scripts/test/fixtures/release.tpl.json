@@ -1,0 +1,14 @@
+{
+  "tag_name": "@TAG@",
+  "name": "@TAG@",
+  "prerelease": false,
+  "assets": [
+    { "name": "slack-mcp-server-darwin-amd64", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/slack-mcp-server-darwin-amd64" },
+    { "name": "slack-mcp-server-darwin-arm64", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/slack-mcp-server-darwin-arm64" },
+    { "name": "slack-mcp-server-linux-amd64", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/slack-mcp-server-linux-amd64" },
+    { "name": "slack-mcp-server-linux-arm64", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/slack-mcp-server-linux-arm64" },
+    { "name": "slack-mcp-server-windows-amd64.exe", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/slack-mcp-server-windows-amd64.exe" },
+    { "name": "slack-mcp-server-windows-arm64.exe", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/slack-mcp-server-windows-arm64.exe" },
+    { "name": "checksums.txt", "browser_download_url": "https://github.com/provectus/slack-mcp-server/releases/download/@TAG@/checksums.txt" }
+  ]
+}

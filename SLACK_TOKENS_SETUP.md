@@ -1,6 +1,6 @@
 # Creating `~/.ssh/slack_tokens`
 
-The LaunchAgent and `run-with-tokens.sh` read Slack MCP environment variables from **`~/.ssh/slack_tokens`**. This keeps tokens out of the plist and in a single file you can secure with `chmod 600`.
+The background service (macOS LaunchAgent or Linux systemd user unit) and `run-with-tokens.sh` read Slack MCP environment variables from **`~/.ssh/slack_tokens`**. This keeps tokens out of the service definition and in a single file you can secure with `chmod 600`.
 
 ## 1. Create the file
 
@@ -65,7 +65,15 @@ You can add any supported env vars to the same file, for example:
 
 Comments (lines starting with `#`) and empty lines are ignored.
 
-## 4. Install and start the LaunchAgent
+## 4. Install and start the background service
+
+> **Tip:** once `~/.ssh/slack_tokens` exists, the installer can set up (or re-run) the background service for you — launchd on macOS, systemd user unit on Linux — with no repo clone or plist editing:
+>
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/provectus/slack-mcp-server/master/scripts/install.sh | bash -s -- --with-service
+> ```
+>
+> The manual LaunchAgent steps below are for the source-build flow on macOS.
 
 ```bash
 # Copy plist into LaunchAgents (from your repo clone)

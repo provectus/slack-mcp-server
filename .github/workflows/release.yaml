@@ -1,9 +1,9 @@
-name: Release NPM
+name: Release
 
 on:
   push:
     tags:
-      - '*'
+      - 'pv-v*'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -11,16 +11,14 @@ concurrency:
 
 env:
   GO_VERSION: 1.25
-  NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
 permissions:
   contents: write
-  discussions: write
 
 jobs:
   release:
     name: Release
-    runs-on: macos-latest
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -29,14 +27,21 @@ jobs:
         with:
           go-version: ${{ env.GO_VERSION }}
 
-      - name: Install dependencies
-        run: npm install -g @anthropic-ai/dxt
+      - name: Guard against dirty version stamp
+        run: |
+          desc="$(git describe --tags --always --dirty)"
+          echo "git describe: $desc"
+          if [[ "$desc" == *-dirty ]]; then
+            echo "::error::Working tree is dirty; refusing to stamp a -dirty release version." >&2
+            git status --porcelain >&2
+            exit 1
+          fi
 
       - name: Build binaries
         run: make build-all-platforms
 
-      - name: Build DTX Extension
-        run: make build-dxt
+      - name: Generate checksums
+        run: cd build && sha256sum slack-mcp-server-* > checksums.txt
 
       - name: Upload artifacts
         uses: softprops/action-gh-release@v3
@@ -44,12 +49,6 @@ jobs:
           generate_release_notes: true
           make_latest: true
           files: |
-            LICENSE
             build/slack-mcp-server-*
-            build/slack-mcp-server.dxt
-            .env.dist
-            docker-compose.yml
-
-      - name: Publish npm
-        run:
-          make npm-publish
+            build/checksums.txt
+            LICENSE

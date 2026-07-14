@@ -2,6 +2,9 @@
 
 You can configure the MCP server using command line arguments and environment variables.
 
+> [!NOTE]
+> The DXT, Cursor Installer, npx, and Docker methods below use the **upstream** `korotovsky/slack-mcp-server` distribution channels (npm package `slack-mcp-server`, `ghcr.io/korotovsky/slack-mcp-server`, upstream releases) and install the upstream edition. This fork publishes prebuilt binaries only — see [Installation](02-installation.md) for the fork's binary install.
+
 ### Using DXT
 
 For [Claude Desktop](https://claude.ai/download) users, you can use the DXT extension to run the MCP server without needing to edit the `claude_desktop_config.json` file directly. Download the [latest version](https://github.com/korotovsky/slack-mcp-server/releases/latest/download/slack-mcp-server.dxt) of the DXT Extension from [releases](https://github.com/korotovsky/slack-mcp-server/releases) page.

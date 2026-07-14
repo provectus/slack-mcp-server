@@ -343,6 +343,38 @@ Fetches a CSV directory of all users in the workspace.
 
 ## Setup Guide
 
+### Install
+
+One command installs the latest fork release binary on macOS or Linux — no Go toolchain needed:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/provectus/slack-mcp-server/master/scripts/install.sh | bash
+```
+
+The installer detects your platform, downloads the binary from the latest `pv-v*` [release](https://github.com/provectus/slack-mcp-server/releases), verifies its sha256 against the release `checksums.txt`, installs it to `~/.local/bin/slack-mcp-server`, and probes it with `--version`. If the install directory is not on your `PATH`, it prints the exact `export PATH=...` line to add. Options (append after `bash -s --`):
+
+| Flag | Effect |
+|---|---|
+| `--version <pv-vX.Y.Z>` | Install a specific release (default: latest) |
+| `--prefix <dir>` | Install directory (default: `$HOME/.local/bin`) |
+| `--with-updater` / `--no-updater` | Pre-answer the "install the updater?" question, so no prompt appears (for agents/automation; a non-interactive run without either flag installs the updater by default) |
+| `--with-service` | Also set up the background service — launchd on macOS, systemd user unit on Linux; needs `~/.ssh/slack_tokens` (see below) |
+
+Example: `curl -fsSL https://raw.githubusercontent.com/provectus/slack-mcp-server/master/scripts/install.sh | bash -s -- --version pv-v1.0.0 --with-service`
+
+### Update
+
+The installer places `slack-mcp-update` next to the binary:
+
+```bash
+slack-mcp-update           # check and, if newer, update in place
+slack-mcp-update --check   # report only, change nothing
+```
+
+Output is agent-friendly: it ends with machine-readable lines `INSTALLED=<tag>`, `LATEST=<tag>`, `RESULT=up-to-date|updated|update-available|error`, `CONFIG_CHANGES=<n>`. Exit codes: `0` up-to-date or updated, `10` update available (`--check` only), `1` error. When the update range crosses a release whose notes contain `CONFIG-CHANGE:` lines, each one is printed as a prominent `WARNING (pv-vX.Y.Z): <note>` block — review those notes before relying on the updated server. If the background service is configured, the updater restarts it onto the new binary.
+
+### Guides
+
 - [Authentication Setup](docs/01-authentication-setup.md)
 - [Installation](docs/02-installation.md)
 - [Configuration and Usage](docs/03-configuration-and-usage.md)
@@ -401,15 +433,24 @@ npx @modelcontextprotocol/inspector go run mcp/mcp-server.go --transport stdio
 tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
 ```
 
-### Running as a macOS background service (LaunchAgent)
+### Running as a background service (launchd on macOS, systemd on Linux)
 
-To keep the server running on the SSE transport and start it automatically at login, this repo ships a launchd setup:
+To keep the server always on (SSE transport, `http://127.0.0.1:13080/sse`) and start it automatically at login, both setups below run the server through `run-with-tokens.sh`, which loads tokens from `~/.ssh/slack_tokens` (secured with `chmod 600` — see [`SLACK_TOKENS_SETUP.md`](SLACK_TOKENS_SETUP.md)) and resolves the server binary in this order: `$SLACK_MCP_BIN` env var → `~/.local/bin/slack-mcp-server` → `<repo>/build/slack-mcp-server`.
 
-- `com.slack-mcp-server.plist` — LaunchAgent definition
-- `run-with-tokens.sh` — wrapper that loads tokens from `~/.ssh/slack_tokens`, builds the binary if needed, and launches the server with `-t sse`
-- [`SLACK_TOKENS_SETUP.md`](SLACK_TOKENS_SETUP.md) — how to create the `~/.ssh/slack_tokens` file and install the LaunchAgent
+**Curl-install flow (no repo checkout needed).** Once the token file exists, run the installer with the service option:
 
-Tokens live in `~/.ssh/slack_tokens` (secured with `chmod 600`) rather than in the plist. Once installed, the server listens on `http://127.0.0.1:13080/sse`. See [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) for the full walkthrough.
+```bash
+curl -fsSL https://raw.githubusercontent.com/provectus/slack-mcp-server/master/scripts/install.sh | bash -s -- --with-service
+```
+
+It downloads `run-with-tokens.sh` to `~/.local/share/slack-mcp-server/` and then:
+
+- **macOS:** renders `~/Library/LaunchAgents/com.slack-mcp-server.plist` with real paths (RunAtLoad / KeepAlive, logs under `~/Library/Logs/`) and loads it via `launchctl bootstrap` + `kickstart -k`.
+- **Linux:** renders the systemd user unit `~/.config/systemd/user/slack-mcp-server.service` (`Restart=on-failure`) and runs `systemctl --user daemon-reload && systemctl --user enable --now slack-mcp-server`. To start at boot without an active login session, additionally run `loginctl enable-linger $(id -un)`.
+
+Both render `SLACK_MCP_BIN` into the service environment, pinning the service to the just-installed binary. If `~/.ssh/slack_tokens` is missing, the binary is still installed and service setup is skipped with a warning pointing to [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) — re-run the same command after creating the file.
+
+**Source-build flow (macOS).** From a repo clone, the shipped `com.slack-mcp-server.plist` placeholder template plus `run-with-tokens.sh` set up the same LaunchAgent — see [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) for the one-time install. After code changes, `make reinstall-service` rebuilds the binary and restarts the agent. Caveat: because `run-with-tokens.sh` prefers `~/.local/bin/slack-mcp-server`, a curl-installed binary shadows the repo build — pin `SLACK_MCP_BIN=<repo>/build/slack-mcp-server` in the plist environment (or remove the `~/.local/bin` copy) to run your fresh build.
 
 ## Security
 
