@@ -313,8 +313,12 @@ setup_service() {
   # run-with-tokens.sh resolves it right after $SLACK_MCP_BIN, so the pin
   # works for any --prefix and can be repointed later (make service-local /
   # make service-release) without touching the rendered service files.
-  ln -sfn "$bin_path" "${share_dir}/current"
-  log "Binary pin: ${share_dir}/current -> ${bin_path}"
+  # Absolutize the target first so a relative --prefix cannot produce a
+  # symlink that resolves against share_dir instead of the install dir.
+  local bin_abs
+  bin_abs="$(cd "$(dirname "$bin_path")" && pwd)/$(basename "$bin_path")"
+  ln -sfn "$bin_abs" "${share_dir}/current"
+  log "Binary pin: ${share_dir}/current -> ${bin_abs}"
   case "$(uname -s)" in
     Darwin) setup_service_darwin "$run_script" "$share_dir" ;;
     Linux) setup_service_linux "$run_script" ;;

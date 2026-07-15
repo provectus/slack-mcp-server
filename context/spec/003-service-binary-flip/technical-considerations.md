@@ -1,7 +1,7 @@
 # Technical Specification: Service Binary Flip (Development ↔ Release)
 
 - **Functional Specification:** [functional-spec.md](functional-spec.md)
-- **Status:** Approved
+- **Status:** Completed
 - **Author(s):** Aleksandr Makarov
 
 ---

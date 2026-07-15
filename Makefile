@@ -88,8 +88,10 @@ service-restart:
 	  fi; \
 	  launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL); \
 	else \
-	  systemctl --user restart $(BINARY_NAME) || { \
-	    echo "systemd user service $(BINARY_NAME) is not installed. One-time setup: scripts/install.sh --with-service (see README)."; exit 1; }; \
+	  if ! systemctl --user cat $(BINARY_NAME) >/dev/null 2>&1; then \
+	    echo "systemd user service $(BINARY_NAME) is not installed. One-time setup: scripts/install.sh --with-service (see README)."; exit 1; \
+	  fi; \
+	  systemctl --user restart $(BINARY_NAME); \
 	fi
 	@echo "Service restarted. Reconnect your MCP client to pick up tool changes."
 
@@ -123,6 +125,8 @@ service-status: ## Show the pinned binary, service state and version
 	fi
 	@printf 'Binary:  '; \
 	if [ -x "$(PIN_LINK)" ]; then "$(PIN_LINK)" --version | head -n 1; \
+	elif [ -L "$(PIN_LINK)" ] || [ -e "$(PIN_LINK)" ]; then \
+	  echo "BROKEN PIN -> $$(readlink "$(PIN_LINK)") (service will fail to start; repoint with make service-local / make service-release)"; \
 	elif [ -x "$(RELEASE_BIN)" ]; then "$(RELEASE_BIN)" --version | head -n 1; \
 	elif [ -x "$(CURDIR)/build/$(BINARY_NAME)" ]; then "$(CURDIR)/build/$(BINARY_NAME)" --version | head -n 1; \
 	else echo "no binary found"; fi

@@ -143,17 +143,20 @@ case_macos_service_render() {
 }
 
 # assert_pin <expected-target> — the `current` symlink in the share dir
-# exists and points at the expected binary.
+# exists and points at the expected binary. The installer absolutizes the
+# pin target (cd + pwd), so normalize the expectation the same way.
 assert_pin() {
   local pin="$HOME/.local/share/slack-mcp-server/current"
   if [ ! -L "$pin" ]; then
     echo "ASSERT: binary pin symlink missing: $pin"
     return 1
   fi
+  local expected
+  expected="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
   local target
   target="$(readlink "$pin")"
-  if [ "$target" != "$1" ]; then
-    echo "ASSERT: binary pin points at '$target', expected '$1'"
+  if [ "$target" != "$expected" ]; then
+    echo "ASSERT: binary pin points at '$target', expected '$expected'"
     return 1
   fi
 }
