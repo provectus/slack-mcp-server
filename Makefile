@@ -75,18 +75,57 @@ release: ## Create release tag. Usage: make release TAG=pv-vX.Y.Z
 	git push fork "$(TAG)"
 
 LAUNCHD_LABEL := com.slack-mcp-server
+PIN_LINK = $(HOME)/.local/share/$(BINARY_NAME)/current
+RELEASE_BIN = $(HOME)/.local/bin/$(BINARY_NAME)
+
+# Internal: restart the background service (launchd on macOS, systemd user
+# unit on Linux). Fails with setup instructions when no service is installed.
+.PHONY: service-restart
+service-restart:
+	@if [ "$$(uname)" = "Darwin" ]; then \
+	  if ! launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; then \
+	    echo "LaunchAgent $(LAUNCHD_LABEL) is not installed. One-time setup: scripts/install.sh --with-service (see README)."; exit 1; \
+	  fi; \
+	  launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL); \
+	else \
+	  systemctl --user restart $(BINARY_NAME) || { \
+	    echo "systemd user service $(BINARY_NAME) is not installed. One-time setup: scripts/install.sh --with-service (see README)."; exit 1; }; \
+	fi
+	@echo "Service restarted. Reconnect your MCP client to pick up tool changes."
+
+.PHONY: service-local
+service-local: build ## Pin the service to the repo build and restart it
+	@mkdir -p "$(HOME)/.local/share/$(BINARY_NAME)"
+	ln -sfn "$(CURDIR)/build/$(BINARY_NAME)" "$(PIN_LINK)"
+	@$(MAKE) --no-print-directory service-restart service-status
+
+.PHONY: service-release
+service-release: ## Pin the service to the release binary (installs it if missing) and restart it
+	@if [ ! -x "$(RELEASE_BIN)" ]; then \
+	  echo "Release binary not found; running the installer..."; \
+	  bash scripts/install.sh --with-updater; \
+	fi
+	@mkdir -p "$(HOME)/.local/share/$(BINARY_NAME)"
+	ln -sfn "$(RELEASE_BIN)" "$(PIN_LINK)"
+	@$(MAKE) --no-print-directory service-restart service-status
+
+.PHONY: service-status
+service-status: ## Show the pinned binary, service state and version
+	@printf 'Pin:     '; \
+	if [ -L "$(PIN_LINK)" ]; then readlink "$(PIN_LINK)"; \
+	else echo "none (auto-detect: ~/.local/bin, then repo build/)"; fi
+	@if [ "$$(uname)" = "Darwin" ]; then \
+	  if launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; \
+	  then echo "Service: loaded (launchd)"; else echo "Service: not installed (launchd)"; fi; \
+	else \
+	  if systemctl --user is-active $(BINARY_NAME) >/dev/null 2>&1; \
+	  then echo "Service: running (systemd user)"; else echo "Service: not running (systemd user)"; fi; \
+	fi
+	@printf 'Binary:  '; \
+	if [ -x "$(PIN_LINK)" ]; then "$(PIN_LINK)" --version | head -n 1; \
+	elif [ -x "$(RELEASE_BIN)" ]; then "$(RELEASE_BIN)" --version | head -n 1; \
+	elif [ -x "$(CURDIR)/build/$(BINARY_NAME)" ]; then "$(CURDIR)/build/$(BINARY_NAME)" --version | head -n 1; \
+	else echo "no binary found"; fi
 
 .PHONY: reinstall-service
-reinstall-service: build ## Rebuild the binary and restart the local macOS LaunchAgent
-	@if [ "$$(uname)" != "Darwin" ]; then \
-	  echo "reinstall-service is macOS-only (uses launchctl / LaunchAgent)."; exit 1; \
-	fi
-	@if ! launchctl print gui/$$(id -u)/$(LAUNCHD_LABEL) >/dev/null 2>&1; then \
-	  echo "LaunchAgent $(LAUNCHD_LABEL) is not installed. See the 'Running as a background service (launchd on macOS, systemd on Linux)' section in README.md for one-time setup, then re-run."; exit 1; \
-	fi
-	launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL)
-	@echo "Restarted $(LAUNCHD_LABEL). Reconnect your MCP client to pick up tool changes."
-	@if [ -x "$$HOME/.local/bin/slack-mcp-server" ]; then \
-	  echo "Note: run-with-tokens.sh prefers ~/.local/bin/slack-mcp-server (curl install) over build/, so the service may NOT be running your fresh build."; \
-	  echo "To pin the repo build, set SLACK_MCP_BIN=$(CURDIR)/build/$(BINARY_NAME) in the plist env — or remove the ~/.local/bin copy."; \
-	fi
+reinstall-service: service-local ## Deprecated alias for service-local

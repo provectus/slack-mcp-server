@@ -8,8 +8,10 @@ export HOME="${HOME:-$(eval echo ~$(id -un))}"
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
 TOKENS_FILE="${HOME}/.ssh/slack_tokens"
 
-# Resolve the server binary: $SLACK_MCP_BIN > ~/.local/bin > <repo>/build.
-# Prints the chosen path on stdout; returns 1 if SLACK_MCP_BIN is set but unusable.
+# Resolve the server binary: $SLACK_MCP_BIN > `current` pin symlink >
+# ~/.local/bin > <repo>/build. Prints the chosen path on stdout; returns 1
+# if an explicit override (env var or pin) exists but is unusable — a stale
+# pin must fail loudly, not silently fall back.
 resolve_binary() {
   if [[ -n "${SLACK_MCP_BIN:-}" ]]; then
     if [[ -x "$SLACK_MCP_BIN" ]]; then
@@ -18,6 +20,16 @@ resolve_binary() {
     fi
     echo "Error: SLACK_MCP_BIN is set to '$SLACK_MCP_BIN' but it is not an executable file." >&2
     echo "Fix the path or unset SLACK_MCP_BIN to fall back to auto-detection." >&2
+    return 1
+  fi
+  local pin="${HOME}/.local/share/slack-mcp-server/current"
+  if [[ -e "$pin" || -L "$pin" ]]; then
+    if [[ -x "$pin" ]]; then
+      echo "$pin"
+      return 0
+    fi
+    echo "Error: binary pin '$pin' exists but does not point to an executable file." >&2
+    echo "Repoint it (make service-local / make service-release) or remove it to fall back to auto-detection." >&2
     return 1
   fi
   if [[ -x "${HOME}/.local/bin/slack-mcp-server" ]]; then

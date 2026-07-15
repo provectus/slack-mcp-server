@@ -113,9 +113,11 @@ case_macos_service_render() {
   assert_contains "$PLIST" "<string>$HOME/Library/Logs/slack-mcp-server.log</string>"
   assert_contains "$PLIST" "<string>$HOME/Library/Logs/slack-mcp-server.err.log</string>"
   assert_contains "$PLIST" "<string>$HOME</string>"
-  assert_contains "$PLIST" "<key>SLACK_MCP_BIN</key>"
-  assert_contains "$PLIST" "<string>$BIN</string>"
+  assert_not_contains "$PLIST" "SLACK_MCP_BIN"
   assert_not_contains "$PLIST" "/path/to"
+
+  # binary pinned via the `current` symlink, not the service environment
+  assert_pin "$BIN"
   assert_not_contains "$PLIST" "YOUR_USERNAME"
 
   # the rendered plist is valid plist XML (plutil on macOS; skip elsewhere)
@@ -138,6 +140,22 @@ case_macos_service_render() {
   assert_no_file "$UNIT"
   assert_contains "$WORK/out" "Service started: com.slack-mcp-server (launchd)"
   assert_empty_dir "$ITMP"
+}
+
+# assert_pin <expected-target> — the `current` symlink in the share dir
+# exists and points at the expected binary.
+assert_pin() {
+  local pin="$HOME/.local/share/slack-mcp-server/current"
+  if [ ! -L "$pin" ]; then
+    echo "ASSERT: binary pin symlink missing: $pin"
+    return 1
+  fi
+  local target
+  target="$(readlink "$pin")"
+  if [ "$target" != "$1" ]; then
+    echo "ASSERT: binary pin points at '$target', expected '$1'"
+    return 1
+  fi
 }
 
 # s_verify_unit — the rendered unit passes systemd's own verifier when
@@ -182,7 +200,8 @@ case_linux_service_render() {
   assert_contains "$UNIT" "[Unit]"
   assert_contains "$UNIT" "Description="
   assert_contains "$UNIT" "ExecStart=/bin/bash \"$RUN_SCRIPT\""
-  assert_contains "$UNIT" "Environment=\"SLACK_MCP_BIN=$BIN\""
+  assert_not_contains "$UNIT" "SLACK_MCP_BIN"
+  assert_pin "$BIN"
   assert_contains "$UNIT" "Restart=on-failure"
   assert_contains "$UNIT" "WantedBy=default.target"
   assert_not_contains "$UNIT" "/path/to"
@@ -220,7 +239,8 @@ case_linux_service_whitespace_prefix() {
 
   assert_file "$UNIT"
   assert_contains "$UNIT" "ExecStart=/bin/bash \"$RUN_SCRIPT\""
-  assert_contains "$UNIT" "Environment=\"SLACK_MCP_BIN=$BIN\""
+  assert_not_contains "$UNIT" "SLACK_MCP_BIN"
+  assert_pin "$BIN"
   s_verify_unit || return 1
 }
 

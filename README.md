@@ -435,7 +435,7 @@ tail -n 20 -f ~/Library/Logs/Claude/mcp*.log
 
 ### Running as a background service (launchd on macOS, systemd on Linux)
 
-To keep the server always on (SSE transport, `http://127.0.0.1:13080/sse`) and start it automatically at login, both setups below run the server through `run-with-tokens.sh`, which loads tokens from `~/.ssh/slack_tokens` (secured with `chmod 600` — see [`SLACK_TOKENS_SETUP.md`](SLACK_TOKENS_SETUP.md)) and resolves the server binary in this order: `$SLACK_MCP_BIN` env var → `~/.local/bin/slack-mcp-server` → `<repo>/build/slack-mcp-server`.
+To keep the server always on (SSE transport, `http://127.0.0.1:13080/sse`) and start it automatically at login, both setups below run the server through `run-with-tokens.sh`, which loads tokens from `~/.ssh/slack_tokens` (secured with `chmod 600` — see [`SLACK_TOKENS_SETUP.md`](SLACK_TOKENS_SETUP.md)) and resolves the server binary in this order: `$SLACK_MCP_BIN` env var → `~/.local/share/slack-mcp-server/current` pin symlink → `~/.local/bin/slack-mcp-server` → `<repo>/build/slack-mcp-server`.
 
 **Curl-install flow (no repo checkout needed).** Once the token file exists, run the installer with the service option:
 
@@ -448,9 +448,17 @@ It downloads `run-with-tokens.sh` to `~/.local/share/slack-mcp-server/` and then
 - **macOS:** renders `~/Library/LaunchAgents/com.slack-mcp-server.plist` with real paths (RunAtLoad / KeepAlive, logs under `~/Library/Logs/`) and loads it via `launchctl bootstrap` + `kickstart -k`.
 - **Linux:** renders the systemd user unit `~/.config/systemd/user/slack-mcp-server.service` (`Restart=on-failure`) and runs `systemctl --user daemon-reload && systemctl --user enable --now slack-mcp-server`. To start at boot without an active login session, additionally run `loginctl enable-linger $(id -un)`.
 
-Both render `SLACK_MCP_BIN` into the service environment, pinning the service to the just-installed binary. If `~/.ssh/slack_tokens` is missing, the binary is still installed and service setup is skipped with a warning pointing to [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) — re-run the same command after creating the file.
+Both pin the service to the just-installed binary via the `~/.local/share/slack-mcp-server/current` symlink. If `~/.ssh/slack_tokens` is missing, the binary is still installed and service setup is skipped with a warning pointing to [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) — re-run the same command after creating the file.
 
-**Source-build flow (macOS).** From a repo clone, the shipped `com.slack-mcp-server.plist` placeholder template plus `run-with-tokens.sh` set up the same LaunchAgent — see [SLACK_TOKENS_SETUP.md](SLACK_TOKENS_SETUP.md) for the one-time install. After code changes, `make reinstall-service` rebuilds the binary and restarts the agent. Caveat: because `run-with-tokens.sh` prefers `~/.local/bin/slack-mcp-server`, a curl-installed binary shadows the repo build — pin `SLACK_MCP_BIN=<repo>/build/slack-mcp-server` in the plist environment (or remove the `~/.local/bin` copy) to run your fresh build.
+**Developing against the service (repo clone).** The pin symlink makes the running service flippable between the release binary and your local build — same service, same tokens:
+
+```bash
+make service-local     # build the repo binary, pin the service to it, restart
+make service-release   # pin back to the release binary (installs it if missing), restart
+make service-status    # show the pin target, service state and binary version
+```
+
+`slack-mcp-update` keeps working in release mode — it swaps `~/.local/bin/slack-mcp-server` in place, so the pin survives updates. (`make reinstall-service` remains as a deprecated alias for `service-local`.)
 
 ## Security
 
