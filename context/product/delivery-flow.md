@@ -110,6 +110,8 @@ The canonical project config every generated flow command checks against. Flow-a
 
 - **Local-review reviewer agent is `pr-review-toolkit:code-reviewer`** (plugin-namespaced), not a bare `code-reviewer`. Observed during 001-channel-members: dispatching `code-reviewer` failed with "Agent type not found"; the installed agent carries the `pr-review-toolkit:` plugin prefix. `/implement-feature` Step 8 was corrected to name it. Preserve the prefix on any `/awos:flow` regeneration.
 
+- **`/awos:tasks`' internal review question is skipped under the flow.** Observed during 003-service-binary-flip: the flow declares "no gate" after `/awos:tasks`, but the inner `.awos/commands/tasks.md` Step 5 mandates its own `AskUserQuestion` review, producing a contradictory extra gate. User-approved resolution (2026-07-15): when `/awos:tasks` runs under `/implement-feature`, the task list is flow-accepted — no review question, `<!-- not-user-reviewed -->` marker removed — because the implementation and verify stages gate the tasks' content. `/implement-feature` Step 4 records this; preserve it on any `/awos:flow` regeneration.
+
 ---
 
 ## Generation Log

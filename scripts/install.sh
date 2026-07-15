@@ -206,13 +206,12 @@ install_run_script() {
   log "Run script installed: ${dest}"
 }
 
-# setup_service_darwin <run-script> <share-dir> <bin-path> — render the
-# LaunchAgent plist with real paths (never the repo's placeholder template)
-# and (re)bootstrap it. launchctl is resolved via PATH.
+# setup_service_darwin <run-script> <share-dir> — render the LaunchAgent
+# plist with real paths (never the repo's placeholder template) and
+# (re)bootstrap it. launchctl is resolved via PATH.
 setup_service_darwin() {
   local run_script="$1"
   local share_dir="$2"
-  local bin_path="$3"
   local plist="${HOME}/Library/LaunchAgents/${SERVICE_LABEL}.plist"
   mkdir -p "${HOME}/Library/LaunchAgents" "${HOME}/Library/Logs"
   cat >"$plist" <<EOF
@@ -243,8 +242,6 @@ setup_service_darwin() {
     <string>${HOME}</string>
     <key>PATH</key>
     <string>/usr/local/bin:/usr/bin:/bin</string>
-    <key>SLACK_MCP_BIN</key>
-    <string>${bin_path}</string>
   </dict>
 </dict>
 </plist>
@@ -265,11 +262,10 @@ EOF
   fi
 }
 
-# setup_service_linux <run-script> <bin-path> — render the systemd user unit
-# and enable + start it. systemctl is resolved via PATH.
+# setup_service_linux <run-script> — render the systemd user unit and
+# enable + start it. systemctl is resolved via PATH.
 setup_service_linux() {
   local run_script="$1"
-  local bin_path="$2"
   local unit_dir="${HOME}/.config/systemd/user"
   local unit="${unit_dir}/${BINARY_NAME}.service"
   mkdir -p "$unit_dir"
@@ -279,7 +275,6 @@ Description=Slack MCP server (SSE transport)
 
 [Service]
 ExecStart=/bin/bash "${run_script}"
-Environment="SLACK_MCP_BIN=${bin_path}"
 Restart=on-failure
 
 [Install]
@@ -314,9 +309,19 @@ setup_service() {
     return 0
   fi
   local run_script="${share_dir}/run-with-tokens.sh"
+  # Pin the service to the just-installed binary via the `current` symlink;
+  # run-with-tokens.sh resolves it right after $SLACK_MCP_BIN, so the pin
+  # works for any --prefix and can be repointed later (make service-local /
+  # make service-release) without touching the rendered service files.
+  # Absolutize the target first so a relative --prefix cannot produce a
+  # symlink that resolves against share_dir instead of the install dir.
+  local bin_abs
+  bin_abs="$(cd "$(dirname "$bin_path")" && pwd)/$(basename "$bin_path")"
+  ln -sfn "$bin_abs" "${share_dir}/current"
+  log "Binary pin: ${share_dir}/current -> ${bin_abs}"
   case "$(uname -s)" in
-    Darwin) setup_service_darwin "$run_script" "$share_dir" "$bin_path" ;;
-    Linux) setup_service_linux "$run_script" "$bin_path" ;;
+    Darwin) setup_service_darwin "$run_script" "$share_dir" ;;
+    Linux) setup_service_linux "$run_script" ;;
   esac
 }
 

@@ -80,7 +80,7 @@ Run the AWOS commands sequentially in the **main context** — per §8, every on
 
 1. `/awos:spec` — passing the normalized feature as context. **Approval gate:** after it completes, present the `functional-spec.md` path and `AskUserQuestion` (approve / revise) before continuing.
 2. `/awos:tech` — **Approval gate:** after it completes, present the `technical-considerations.md` path and `AskUserQuestion` (approve / revise) before continuing.
-3. `/awos:tasks` — no gate; proceed straight to implementation. The task list stays revisable by re-running `/awos:tasks`.
+3. `/awos:tasks` — no gate; proceed straight to implementation. The task list stays revisable by re-running `/awos:tasks`. This overrides the inner command's own Step 5 review question (`.awos/commands/tasks.md` asks for review via `AskUserQuestion` and gates a `<!-- not-user-reviewed -->` marker on it): when run under this flow, do **not** ask — treat the list as flow-accepted, remove the marker, and continue. The implementation and verify stages are the real gates on the tasks' content. (User-approved flow fix, 2026-07-15.)
 
 Store the spec directory name (e.g. `003-group-dm-support`) as `SPEC_NAME`. Write the first flow-log entry now, recording the feature title.
 
