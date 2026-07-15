@@ -58,12 +58,12 @@ The canonical project config every generated flow command checks against. Flow-a
 
 ## 5. Delivery
 
-- **Mode:** batched. Features merge to `fork/master` as they finish; user-facing releases are cut separately and infrequently by tagging (`make release TAG=vX.Y.Z`), which batches merged work into an NPM/GitHub/Docker release. Releases are **out of the per-feature flow**.
+- **Mode:** batched. Features merge to `fork/master` as they finish; user-facing releases are cut separately and infrequently by tagging (`make release TAG=pv-vX.Y.Z`), which batches merged work into a GitHub release of prebuilt binaries. Releases are **out of the per-feature flow**.
 - **Merge policy:** a human merges. The flow drives everything up to green gates, then **stops at the ready-to-merge state** and reports the PR link — the maintainer merges on GitHub. The flow never merges.
 - **Post-merge CI:** pushing to `master` re-runs `unit-tests.yaml` and `security-trivy.yaml`. Because the flow hands off before merge, these are observed by the maintainer after they merge — not automated by the flow.
 - **Approvals:** none beyond the maintainer's own merge.
 - **Versioning:** git-tag driven, via ldflags (`GIT_VERSION = git describe --tags --always --dirty`). No VERSION file. Bumping happens only at release time (`make release`), not per feature.
-- **Deployment:** never, per feature. Deployment is the tag-triggered release (`release.yaml` → NPM + GitHub release + DXT; `release-image.yaml` → multi-arch Docker to `ghcr.io`), run manually by tagging. The flow does not tag or deploy.
+- **Deployment:** never, per feature. Deployment is the tag-triggered release (`release.yaml` on `pv-v*` tags → GitHub release with cross-compiled binaries + `checksums.txt`), run manually by tagging. The flow does not tag or deploy.
 - **Ticket state transitions:** n/a — ticketless source.
 - **Definition of Done:** the PR is merged into `fork/master` with green CI. Since the flow hands off at ready-to-merge, its terminal reported state is "PR open, all gates green, ready to merge"; the maintainer's merge closes the loop. The close-out reminds the maintainer to check off the corresponding `context/product/roadmap.md` item after merge.
 

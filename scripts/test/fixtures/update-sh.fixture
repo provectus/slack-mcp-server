@@ -1,0 +1,4 @@
+#!/bin/sh
+# Fixture stand-in for scripts/update.sh, served by the curl shim when the
+# installer downloads the updater.
+echo "slack-mcp-update fixture"

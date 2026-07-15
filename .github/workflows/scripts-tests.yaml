@@ -1,0 +1,38 @@
+name: Scripts Tests
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scripts-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install shellcheck (macOS)
+        if: runner.os == 'macOS'
+        run: brew install shellcheck
+
+      - name: Verify shellcheck is available
+        run: shellcheck --version
+
+      - name: Lint scripts (strict)
+        run: shellcheck scripts/*.sh scripts/test/*.sh
+
+      - name: Lint run-with-tokens.sh
+        run: shellcheck -e SC2046,SC2163 run-with-tokens.sh
+
+      - name: Run script tests
+        run: bash scripts/test/run.sh

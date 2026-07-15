@@ -1,167 +1,45 @@
 ## 3. Configuration and Usage
 
-You can configure the MCP server using command line arguments and environment variables.
+You can configure the MCP server using command line arguments and environment variables. This fork is installed as a prebuilt binary (see [Installation](02-installation.md)) and connected to your agentic tool manually — via `stdio` for a client-launched server, or via `sse` for the background service.
 
-### Using DXT
+### Connecting from MCP clients (stdio)
 
-For [Claude Desktop](https://claude.ai/download) users, you can use the DXT extension to run the MCP server without needing to edit the `claude_desktop_config.json` file directly. Download the [latest version](https://github.com/korotovsky/slack-mcp-server/releases/latest/download/slack-mcp-server.dxt) of the DXT Extension from [releases](https://github.com/korotovsky/slack-mcp-server/releases) page.
+Point your MCP-capable tool at the installed binary. For [Claude Desktop](https://claude.ai/download), open `claude_desktop_config.json` and add the server to `mcpServers` (use the absolute path to the binary — `~` is not expanded):
 
-1. Open Claude Desktop and go to the `Settings` menu.
-2. Click on the `Extensions` tab.
-3. Drag and drop the downloaded .dxt file to install it and click "Install".
-5. Fill all required configuration fields
-    - Authentication method: `xoxc/xoxd`, `xoxp`, or `xoxb`.
-    - Value for `SLACK_MCP_XOXC_TOKEN` and `SLACK_MCP_XOXD_TOKEN` in case of `xoxc/xoxd` method, `SLACK_MCP_XOXP_TOKEN` in case of `xoxp`, or `SLACK_MCP_XOXB_TOKEN` in case of `xoxb`.
-    - You may also enable `Add Message Tool` to allow posting messages to channels.
-    - You may also change User-Agent if needed if you have Enterprise Slack.
-6. Enable MCP Server.
+```json
+{
+  "mcpServers": {
+    "slack": {
+      "command": "/Users/you/.local/bin/slack-mcp-server",
+      "args": ["--transport", "stdio"],
+      "env": {
+        "SLACK_MCP_XOXP_TOKEN": "xoxp-..."
+      }
+    }
+  }
+}
+```
 
-> [!IMPORTANT]
-> You may need to disable bundled node in Claude Desktop and let it use node from host machine to avoid some startup issues in case you encounter them. It is DXT known bug: https://github.com/anthropics/dxt/issues/45#issuecomment-3050284228
+Token alternatives for the `env` block (see [Authentication Setup](01-authentication-setup.md)):
 
-### Using Cursor Installer
+- `SLACK_MCP_XOXP_TOKEN` — user OAuth token
+- `SLACK_MCP_XOXB_TOKEN` — bot token (limited access: invited channels only, no search)
+- `SLACK_MCP_XOXC_TOKEN` + `SLACK_MCP_XOXD_TOKEN` — browser session token + cookie
 
-The MCP server can be installed using the Cursor One-Click method.
+For Claude Code:
 
-Below are prepared configurations:
+```bash
+claude mcp add slack -e SLACK_MCP_XOXP_TOKEN=xoxp-... -- ~/.local/bin/slack-mcp-server --transport stdio
+```
 
- - `npx` and `xoxc/xoxd` method: [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=slack-mcp-server&config=eyJjb21tYW5kIjogIm5weCAteSBzbGFjay1tY3Atc2VydmVyQGxhdGVzdCAtLXRyYW5zcG9ydCBzdGRpbyIsImVudiI6IHsiU0xBQ0tfTUNQX1hPWENfVE9LRU4iOiAieG94Yy0uLi4iLCAiU0xBQ0tfTUNQX1hPWERfVE9LRU4iOiAieG94ZC0uLi4ifSwiZGlzYWJsZWQiOiBmYWxzZSwiYXV0b0FwcHJvdmUiOiBbXX0%3D)
- - `npx` and `xoxp` method: [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=slack-mcp-server&config=eyJjb21tYW5kIjogIm5weCAteSBzbGFjay1tY3Atc2VydmVyQGxhdGVzdCAtLXRyYW5zcG9ydCBzdGRpbyIsImVudiI6IHsiU0xBQ0tfTUNQX1hPWFBfVE9LRU4iOiAieG94cC0uLi4ifSwiZGlzYWJsZWQiOiBmYWxzZSwiYXV0b0FwcHJvdmUiOiBbXX0%3D)
- - `npx` and `xoxb` method: [![Install MCP Server](https://cursor.com/deeplink/mcp-install-light.svg)](cursor://anysphere.cursor-deeplink/mcp/install?name=slack-mcp-server&config=eyJjb21tYW5kIjogIm5weCAteSBzbGFjay1tY3Atc2VydmVyQGxhdGVzdCAtLXRyYW5zcG9ydCBzdGRpbyIsImVudiI6IHsiU0xBQ0tfTUNQX1hPWEJfVE9LRU4iOiAieG94Yi0uLi4ifSwiZGlzYWJsZWQiOiBmYWxzZSwiYXV0b0FwcHJvdmUiOiBbXX0%3D)
+The same `command`/`args`/`env` shape works in any tool that supports MCP servers (Cursor's `~/.cursor/mcp.json`, Windsurf, etc.).
 
-> [!IMPORTANT]
-> Remember to replace tokens in the configuration with your own tokens, as they are just examples.
-
-### Using npx
-
-If you have npm installed, this is the fastest way to get started with `slack-mcp-server` on Claude Desktop.
-
-Open your `claude_desktop_config.json` and add the mcp server to the list of `mcpServers`:
-
-> [!WARNING]  
+> [!WARNING]
 > If you are using Enterprise Slack, you may set `SLACK_MCP_USER_AGENT` environment variable to match your browser's User-Agent string from where you extracted `xoxc` and `xoxd` and enable `SLACK_MCP_CUSTOM_TLS` to enable custom TLS-handshakes to start to look like a real browser. This is required for the server to work properly in some environments with higher security policies.
 
-**Option 1: Using XOXP Token**
-``` json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "slack-mcp-server@latest",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXP_TOKEN": "xoxp-..."
-      }
-    }
-  }
-}
-```
+### Connecting over SSE
 
-**Option 2: Using XOXB Token (Bot)**
-``` json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "slack-mcp-server@latest",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXB_TOKEN": "xoxb-..."
-      }
-    }
-  }
-}
-```
-
-**Option 3: Using XOXC/XOXD Tokens**
-``` json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "npx",
-      "args": [
-        "-y",
-        "slack-mcp-server@latest",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXC_TOKEN": "xoxc-...",
-        "SLACK_MCP_XOXD_TOKEN": "xoxd-..."
-      }
-    }
-  }
-}
-```
-
-<details>
-<summary>Or, stdio transport with docker.</summary>
-
-**Option 1: Using XOXP Token**
-```json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "SLACK_MCP_XOXP_TOKEN",
-        "ghcr.io/korotovsky/slack-mcp-server",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXP_TOKEN": "xoxp-..."
-      }
-    }
-  }
-}
-```
-
-**Option 2: Using XOXC/XOXD Tokens**
-```json
-{
-  "mcpServers": {
-    "slack": {
-      "command": "docker",
-      "args": [
-        "run",
-        "-i",
-        "--rm",
-        "-e",
-        "SLACK_MCP_XOXC_TOKEN",
-        "-e",
-        "SLACK_MCP_XOXD_TOKEN",
-        "ghcr.io/korotovsky/slack-mcp-server",
-        "--transport",
-        "stdio"
-      ],
-      "env": {
-        "SLACK_MCP_XOXC_TOKEN": "xoxc-...",
-        "SLACK_MCP_XOXD_TOKEN": "xoxd-..."
-      }
-    }
-  }
-}
-```
-
-Please see [Docker](#Using-Docker) for more information.
-</details>
-
-### Using npx with `sse` transport:
-
-In case you would like to run it in `sse` mode, then you  should use `mcp-remote` wrapper for Claude Desktop and deploy/expose MCP server somewhere e.g. with `ngrok` or `docker-compose`.
+If you installed with `--with-service`, the server already runs in the background (launchd on macOS, systemd user unit on Linux) with the `sse` transport on `127.0.0.1:13080`. Connect clients through the `mcp-remote` wrapper:
 
 ```json
 {
@@ -171,7 +49,7 @@ In case you would like to run it in `sse` mode, then you  should use `mcp-remote
       "args": [
         "-y",
         "mcp-remote",
-        "https://x.y.z.q:3001/sse",
+        "http://127.0.0.1:13080/sse",
         "--header",
         "Authorization: Bearer ${SLACK_MCP_API_KEY}"
       ],
@@ -194,7 +72,7 @@ In case you would like to run it in `sse` mode, then you  should use `mcp-remote
       "args": [
         "-y",
         "mcp-remote",
-        "https://x.y.z.q:3001/sse",
+        "http://127.0.0.1:13080/sse",
         "--header",
         "Authorization: Bearer ${SLACK_MCP_API_KEY}"
       ],
@@ -210,41 +88,16 @@ In case you would like to run it in `sse` mode, then you  should use `mcp-remote
 ### TLS and Exposing to the Internet
 
 There are several reasons why you might need to setup HTTPS for your SSE.
-- `mcp-remote` is capable to handle only https schemes;
+- `mcp-remote` can handle only https schemes for non-localhost endpoints;
 - it is generally a good practice to use TLS for any service exposed to the internet;
 
 You could use `ngrok`:
 
 ```bash
-ngrok http 3001
+ngrok http 13080
 ```
 
 and then use the endpoint `https://903d-xxx-xxxx-xxxx-10b4.ngrok-free.app` for your `mcp-remote` argument.
-
-### Using Docker
-
-For detailed information about all environment variables, see [Environment Variables](https://github.com/korotovsky/slack-mcp-server?tab=readme-ov-file#environment-variables).
-
-```bash
-export SLACK_MCP_XOXC_TOKEN=xoxc-...
-export SLACK_MCP_XOXD_TOKEN=xoxd-...
-
-docker pull ghcr.io/korotovsky/slack-mcp-server:latest
-docker run -i --rm \
-  -e SLACK_MCP_XOXC_TOKEN \
-  -e SLACK_MCP_XOXD_TOKEN \
-  ghcr.io/korotovsky/slack-mcp-server:latest --transport stdio
-```
-
-Or, the docker-compose way:
-
-```bash
-wget -O docker-compose.yml https://github.com/korotovsky/slack-mcp-server/releases/latest/download/docker-compose.yml
-wget -O .env https://github.com/korotovsky/slack-mcp-server/releases/latest/download/default.env.dist
-nano .env # Edit .env file with your tokens from step 1 of the setup guide
-docker network create app-tier
-docker-compose up -d
-```
 
 ### Console Arguments
 

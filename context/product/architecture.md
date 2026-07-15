@@ -6,7 +6,7 @@ A self-hosted Model Context Protocol (MCP) server, written in Go, that gives any
 
 ## 1. Application & Technology Stack
 
-- **Language & Runtime:** Go 1.25.0 — compiled to a single static binary (module `github.com/korotovsky/slack-mcp-server`); version metadata stamped in at build time via ldflags.
+- **Language & Runtime:** Go 1.25.0 — compiled to a single static binary (module `github.com/korotovsky/slack-mcp-server`); version metadata stamped in at build time via ldflags and introspectable via the `--version` flag (`pkg/version.String()`, works with no tokens configured).
 - **MCP Framework:** `github.com/mark3labs/mcp-go` v0.44.0 — provides the MCP server, tool/resource registration, and transport implementations.
 - **Transports:** stdio (default, for local MCP clients), SSE (`server.NewSSEServer`, default host `127.0.0.1:13080`), and streamable HTTP (`server.NewStreamableHTTPServer`). Selected at runtime via the `-t/--transport` flag.
 - **Tooling Layer:** A tool registry exposing read tools, opt-in write tools (off by default, env-gated), user-group management, and saved-items tools. Tools are capability-gated by the active Slack token type.
@@ -24,9 +24,10 @@ A self-hosted Model Context Protocol (MCP) server, written in Go, that gives any
 
 ## 3. Infrastructure & Deployment
 
-- **Distribution Formats:** Go binary (cross-compiled darwin/linux/windows × amd64/arm64), npm (platform-specific packages with a launcher selecting the binary via `optionalDependencies`), Docker (multi-stage `golang:1.25` build → `alpine:3.22` production, with a Delve-enabled dev stage), and a DXT desktop extension (`@anthropic-ai/dxt`, `manifest-dxt.json`).
-- **Local Service Mode:** macOS LaunchAgent (`com.slack-mcp-server.plist` + `run-with-tokens.sh`) running the server as an always-on local service (RunAtLoad / KeepAlive), loading tokens from a local file.
-- **CI/CD:** GitHub Actions — unit tests on push/PR, tagged releases (binaries + DXT + npm), multi-arch container image published to `ghcr.io`, Trivy filesystem vulnerability scanning, and Dependabot dependency updates.
+- **Distribution:** fork-native GitHub Releases on `provectus/slack-mcp-server`, triggered by `pv-v*` tags (`release.yaml`, ubuntu runner): six cross-compiled binaries (darwin/linux/windows × amd64/arm64) plus `checksums.txt` and `LICENSE`, with auto-generated release notes. The fork publishes no npm, DXT, or Docker artifacts — those remain upstream-only channels. A release is marked configuration-changing by `CONFIG-CHANGE: <note>` lines in its release-notes body.
+- **Install & Update:** curl-able `scripts/install.sh` (agent-friendly: platform detection, sha256 verification against the release `checksums.txt`, install to `~/.local/bin`, `--version` pin, `--prefix`, `--with-updater`/`--no-updater` prompt pre-answers, `--with-service`) and `scripts/update.sh`, installed alongside the binary as `slack-mcp-update` (default check+apply, `--check` mode, atomic swap with `.bak` rollback, `CONFIG-CHANGE:` warnings scanned from release notes, machine-readable `INSTALLED=/LATEST=/RESULT=/CONFIG_CHANGES=` output, exit codes 0/10/1, service restart after update).
+- **Local Service Modes:** always-on SSE service via `run-with-tokens.sh` (token file `~/.ssh/slack_tokens`; binary resolution `$SLACK_MCP_BIN` → `~/.local/bin` → repo `build/`), run as a macOS LaunchAgent (RunAtLoad / KeepAlive; `com.slack-mcp-server.plist` stays a placeholder template for source builds, the installer renders its own) or a Linux systemd user unit rendered by the installer (`Restart=on-failure`, linger for start-at-boot).
+- **CI/CD:** GitHub Actions — unit tests on push/PR, scripts CI (`shellcheck` on `scripts/*.sh` + `run-with-tokens.sh` and the plain-sh test harness `scripts/test/run.sh`, on ubuntu and macos runners), Trivy filesystem vulnerability scanning, Dependabot dependency updates, and the tag-triggered release workflow.
 
 ---
 
