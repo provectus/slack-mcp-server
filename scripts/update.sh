@@ -181,7 +181,7 @@ version_in_range() {
 fetch() {
   local url="$1"
   local out="$2"
-  local -a args=(-fsSL --retry 2 --connect-timeout 15 -o "$out")
+  local -a args=(-fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$out")
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
@@ -506,8 +506,13 @@ main() {
   log "Checksum OK"
 
   chmod +x "$STAGING"
-  if ! probe_version_line "$STAGING" >/dev/null; then
+  local staged_line staged_tag
+  if ! staged_line="$(probe_version_line "$STAGING")"; then
     fail_update "downloaded binary failed the --version probe"
+  fi
+  staged_tag="$(printf '%s\n' "$staged_line" | awk '{print $2}')"
+  if [[ "$staged_tag" != "$LATEST_TAG" ]]; then
+    fail_update "downloaded binary reports version '${staged_tag}' instead of ${LATEST_TAG}"
   fi
 
   BAK_PATH="${bin}.bak"

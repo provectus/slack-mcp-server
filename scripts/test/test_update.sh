@@ -384,6 +384,28 @@ case_rollback_bad_probe() {
   u_assert_no_service_calls
 }
 
+case_rollback_stale_version_stamp() {
+  u_sandbox
+  u_install_binary pv-v1.0.0
+  u_stage_latest pv-v1.2.3
+  # re-stamp the served asset with an older version banner; checksum stays
+  # valid because checksums.txt is regenerated from the re-stamped asset.
+  sed "s/@TAG@/pv-v1.2.2/g" "$FIXTURES_DIR/fake-binary.tpl" >"$WORK/assets/$U_ASSET"
+  printf '%s  %s\n' "$(sha256_of "$WORK/assets/$U_ASSET")" "$U_ASSET" \
+    >"$WORK/assets/checksums.txt"
+  u_map_releases 'pv-v1.2.3=routine notes'
+  local pre
+  pre="$(sha256_of "$BIN")"
+  run_update "$WORK/out"
+  assert_rc 1 "$URC"
+  assert_contains "$WORK/out" "ERROR: downloaded binary reports version 'pv-v1.2.2' instead of pv-v1.2.3"
+  assert_contains "$WORK/out" "RESULT=error"
+  u_assert_bin_unchanged "$pre"
+  u_assert_probe pv-v1.0.0
+  u_assert_no_leftovers
+  u_assert_no_service_calls
+}
+
 # --- 6. required end-to-end scenario (tech spec §4) --------------------------
 # Installed old pv-v tag -> newer latest with a config-changing release in
 # between -> --check first, then apply, in one flowing test.
@@ -459,6 +481,7 @@ t_case no_config_change_control case_no_config_change_control
 t_case rollback_failed_download case_rollback_failed_download
 t_case rollback_truncated_download_checksum_mismatch case_rollback_truncated_download_checksum_mismatch
 t_case rollback_bad_probe case_rollback_bad_probe
+t_case rollback_stale_version_stamp case_rollback_stale_version_stamp
 t_case e2e_check_then_apply case_e2e_check_then_apply
 t_case jqless_config_change_scan case_jqless_config_change_scan
 t_done
