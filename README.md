@@ -364,7 +364,7 @@ Example: `curl -fsSL https://raw.githubusercontent.com/provectus/slack-mcp-serve
 
 ### Update
 
-The installer places `slack-mcp-update` next to the binary:
+Unless run with `--no-updater`, the installer places `slack-mcp-update` next to the binary:
 
 ```bash
 slack-mcp-update           # check and, if newer, update in place

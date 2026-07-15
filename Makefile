@@ -85,7 +85,7 @@ reinstall-service: build ## Rebuild the binary and restart the local macOS Launc
 	  echo "LaunchAgent $(LAUNCHD_LABEL) is not installed. See the 'Running as a background service (launchd on macOS, systemd on Linux)' section in README.md for one-time setup, then re-run."; exit 1; \
 	fi
 	launchctl kickstart -k gui/$$(id -u)/$(LAUNCHD_LABEL)
-	@echo "Restarted $(LAUNCHD_LABEL) on the freshly built binary. Reconnect your MCP client to pick up tool changes."
+	@echo "Restarted $(LAUNCHD_LABEL). Reconnect your MCP client to pick up tool changes."
 	@if [ -x "$$HOME/.local/bin/slack-mcp-server" ]; then \
 	  echo "Note: run-with-tokens.sh prefers ~/.local/bin/slack-mcp-server (curl install) over build/, so the service may NOT be running your fresh build."; \
 	  echo "To pin the repo build, set SLACK_MCP_BIN=$(CURDIR)/build/$(BINARY_NAME) in the plist env — or remove the ~/.local/bin copy."; \
