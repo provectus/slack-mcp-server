@@ -140,6 +140,25 @@ case_macos_service_render() {
   assert_empty_dir "$ITMP"
 }
 
+# s_verify_unit — the rendered unit passes systemd's own verifier when
+# available (Linux CI; not macOS). Offline --user verify needs
+# XDG_RUNTIME_DIR, which headless CI runners without a user session leave
+# unset — point it at a sandbox dir so the verifier can initialize; bad
+# units still fail verify under this mode.
+s_verify_unit() {
+  command -v systemd-analyze >/dev/null 2>&1 || return 0
+  local xdg_rt="${XDG_RUNTIME_DIR:-}"
+  if [ -z "$xdg_rt" ]; then
+    xdg_rt="$WORK/xdg-runtime"
+    mkdir -p "$xdg_rt"
+    chmod 700 "$xdg_rt"
+  fi
+  XDG_RUNTIME_DIR="$xdg_rt" systemd-analyze --user verify "$UNIT" || {
+    echo "ASSERT: systemd-analyze verify rejected the rendered unit"
+    return 1
+  }
+}
+
 # --- 2. Linux: unit rendered, daemon-reload + enable --now, linger note ------
 
 case_linux_service_render() {
@@ -162,28 +181,13 @@ case_linux_service_render() {
   assert_file "$UNIT"
   assert_contains "$UNIT" "[Unit]"
   assert_contains "$UNIT" "Description="
-  assert_contains "$UNIT" "ExecStart=/bin/bash $RUN_SCRIPT"
-  assert_contains "$UNIT" "Environment=SLACK_MCP_BIN=$BIN"
+  assert_contains "$UNIT" "ExecStart=/bin/bash \"$RUN_SCRIPT\""
+  assert_contains "$UNIT" "Environment=\"SLACK_MCP_BIN=$BIN\""
   assert_contains "$UNIT" "Restart=on-failure"
   assert_contains "$UNIT" "WantedBy=default.target"
   assert_not_contains "$UNIT" "/path/to"
 
-  # unit passes systemd's own verifier when available (Linux CI; not macOS).
-  # Offline --user verify needs XDG_RUNTIME_DIR, which headless CI runners
-  # without a user session leave unset — point it at a sandbox dir so the
-  # verifier can initialize; bad units still fail verify under this mode.
-  if command -v systemd-analyze >/dev/null 2>&1; then
-    local xdg_rt="${XDG_RUNTIME_DIR:-}"
-    if [ -z "$xdg_rt" ]; then
-      xdg_rt="$WORK/xdg-runtime"
-      mkdir -p "$xdg_rt"
-      chmod 700 "$xdg_rt"
-    fi
-    XDG_RUNTIME_DIR="$xdg_rt" systemd-analyze --user verify "$UNIT" || {
-      echo "ASSERT: systemd-analyze verify rejected the rendered unit"
-      return 1
-    }
-  fi
+  s_verify_unit || return 1
 
   assert_contains "$SERVICE_SHIM_LOG" "systemctl --user daemon-reload"
   assert_contains "$SERVICE_SHIM_LOG" "systemctl --user enable --now slack-mcp-server"
@@ -191,6 +195,33 @@ case_linux_service_render() {
   assert_no_file "$PLIST"
   assert_contains "$WORK/out" "Service started: slack-mcp-server (systemd user)"
   assert_contains "$WORK/out" "loginctl enable-linger"
+}
+
+# --- 2b. Linux: paths with spaces stay quoted in the rendered unit -----------
+
+case_linux_service_whitespace_prefix() {
+  s_sandbox
+  UNAME_SHIM_S=Linux
+  UNAME_SHIM_M=x86_64
+  S_ASSET="slack-mcp-server-linux-amd64"
+  PREFIX="$WORK/pre fix"
+  mkdir -p "$PREFIX"
+  BIN="$PREFIX/slack-mcp-server"
+  s_write_tokens
+  s_stage_latest pv-v1.2.3
+  map_url "$RUN_WITH_TOKENS_URL" "$RUN_WITH_TOKENS_SRC"
+
+  run_install_svc "$WORK/out"
+  assert_rc 0 "$SRC" || {
+    cat "$WORK/out"
+    return 1
+  }
+  assert_exec "$BIN"
+
+  assert_file "$UNIT"
+  assert_contains "$UNIT" "ExecStart=/bin/bash \"$RUN_SCRIPT\""
+  assert_contains "$UNIT" "Environment=\"SLACK_MCP_BIN=$BIN\""
+  s_verify_unit || return 1
 }
 
 # --- 3. checkout run: sibling run-with-tokens.sh copied, not downloaded ------
@@ -264,6 +295,7 @@ case_real_service_untouched() {
 
 t_case macos_service_render case_macos_service_render
 t_case linux_service_render case_linux_service_render
+t_case linux_service_whitespace_prefix case_linux_service_whitespace_prefix
 t_case sibling_run_script_preferred case_sibling_run_script_preferred
 t_case token_file_missing case_token_file_missing
 t_case real_service_untouched case_real_service_untouched

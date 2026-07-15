@@ -98,7 +98,7 @@ validate_tag() {
 fetch() {
   local url="$1"
   local out="$2"
-  local -a args=(-fsSL --retry 2 --connect-timeout 15 -o "$out")
+  local -a args=(-fsSL --retry 2 --connect-timeout 15 --max-time 300 -o "$out")
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
     args+=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
   fi
@@ -278,8 +278,8 @@ setup_service_linux() {
 Description=Slack MCP server (SSE transport)
 
 [Service]
-ExecStart=/bin/bash ${run_script}
-Environment=SLACK_MCP_BIN=${bin_path}
+ExecStart=/bin/bash "${run_script}"
+Environment="SLACK_MCP_BIN=${bin_path}"
 Restart=on-failure
 
 [Install]
@@ -427,15 +427,14 @@ main() {
   mkdir -p "$prefix"
   local dest="${prefix}/${BINARY_NAME}"
   chmod +x "$TMP_DIR/$asset"
-  mv -f "$TMP_DIR/$asset" "$dest"
 
   local probe
-  probe="$("$dest" --version 2>/dev/null | head -n 1)" || true
+  probe="$("$TMP_DIR/$asset" --version 2>/dev/null | head -n 1)" || true
   if [[ "$probe" != "${BINARY_NAME} "* ]]; then
-    err "installed binary failed the --version probe; removing ${dest}"
-    rm -f "$dest"
+    err "downloaded binary failed the --version probe; existing installation unchanged"
     return 5
   fi
+  mv -f "$TMP_DIR/$asset" "$dest"
   log "Installed: ${dest} (${probe})"
 
   local want_updater="$updater"
