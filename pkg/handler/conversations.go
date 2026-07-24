@@ -107,6 +107,8 @@ type draftMessageParams struct {
 	threadTs    string
 	text        string
 	contentType string
+	overwrite   bool
+	draftID     string
 }
 
 type addReactionParams struct {
@@ -145,6 +147,23 @@ type unreadsParams struct {
 type ConversationsHandler struct {
 	apiProvider *provider.ApiProvider
 	logger      *zap.Logger
+	// drafts overrides the drafts API used by the draft-message handler; nil
+	// means use apiProvider.Slack(). Set only by tests — the narrow seam that
+	// lets handler tests record draft calls without a network-backed client.
+	drafts draftsAPI
+	// markdownToRichTextBlockFn and draftContentLossFn override the markdown
+	// pipeline of the draft-message handler; nil means use the real
+	// markdownToRichTextBlock / draftContentLoss. Set only by tests, so they
+	// can prove the application/json content type bypasses conversion and the
+	// loss check entirely (its input is already-valid Slack blocks, not
+	// markdown).
+	markdownToRichTextBlockFn func(markdown string) (*slack.RichTextBlock, error)
+	draftContentLossFn        func(input string, rtb *slack.RichTextBlock) []string
+	// isOAuthTokenFn overrides the provider's token-type check in the
+	// draft-message handler; nil means use apiProvider.IsOAuth(). Set only by
+	// tests, to simulate a non-session (OAuth) token without a network-built
+	// client.
+	isOAuthTokenFn func() bool
 }
 
 func NewConversationsHandler(apiProvider *provider.ApiProvider, logger *zap.Logger) *ConversationsHandler {
@@ -301,12 +320,111 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 	return mcp.NewToolResultText(fmt.Sprintf("Successfully posted message to channel %s (ts=%s)", respChannel, respTimestamp)), nil
 }
 
-// draftResult is the CSV confirmation row returned after creating or replacing a draft.
-type draftResult struct {
-	DraftID  string `csv:"draft_id"`
-	Channel  string `csv:"channel_id"`
-	ThreadTS string `csv:"thread_ts"`
+// draftsAPI is the narrow slice of the Slack client the draft-message handler
+// consumes. It exists as a seam so handler tests can record draft calls
+// against an in-memory fake; production wiring falls through draftsClient()
+// to the real provider client, which already implements it.
+type draftsAPI interface {
+	DraftsList(ctx context.Context, limit int) ([]edge.Draft, error)
+	DraftsCreate(ctx context.Context, channelID, threadTs string, blocks json.RawMessage) (string, error)
+	DraftsUpdate(ctx context.Context, draftID, clientMsgID, lastUpdatedTS, channelID, threadTs string, blocks json.RawMessage) error
 }
+
+// draftsClient returns the drafts API the handler talks to: the injected test
+// seam when set, otherwise the real provider client.
+func (ch *ConversationsHandler) draftsClient() draftsAPI {
+	if ch.drafts != nil {
+		return ch.drafts
+	}
+	return ch.apiProvider.Slack()
+}
+
+// convertMarkdownToRichText converts markdown to a rich_text block through the
+// injected test seam when set, otherwise the real markdownToRichTextBlock.
+func (ch *ConversationsHandler) convertMarkdownToRichText(markdown string) (*slack.RichTextBlock, error) {
+	if ch.markdownToRichTextBlockFn != nil {
+		return ch.markdownToRichTextBlockFn(markdown)
+	}
+	return markdownToRichTextBlock(markdown)
+}
+
+// checkDraftContentLoss runs the conversion loss check through the injected
+// test seam when set, otherwise the real draftContentLoss.
+func (ch *ConversationsHandler) checkDraftContentLoss(input string, rtb *slack.RichTextBlock) []string {
+	if ch.draftContentLossFn != nil {
+		return ch.draftContentLossFn(input, rtb)
+	}
+	return draftContentLoss(input, rtb)
+}
+
+// tokenIsOAuth reports the provider's token-type check through the injected
+// test seam when set, otherwise the real apiProvider.IsOAuth().
+func (ch *ConversationsHandler) tokenIsOAuth() bool {
+	if ch.isOAuthTokenFn != nil {
+		return ch.isOAuthTokenFn()
+	}
+	return ch.apiProvider.IsOAuth()
+}
+
+// Values of draftActionResult.Action.
+const (
+	draftActionCreated       = "created"
+	draftActionReplaced      = "replaced"
+	draftActionExistingFound = "existing_draft_found"
+	draftActionConflict      = "conflict"
+)
+
+// draftContent is one draft's content as reported to the caller: a best-effort
+// readable rendering (display only), the normalised blocks (the authoritative
+// representation, used for provenance comparison and exact restore), and the
+// weak last_updated_client hint.
+type draftContent struct {
+	Text              string          `json:"text"`
+	BlocksJSON        json.RawMessage `json:"blocks_json"`
+	LastUpdatedClient string          `json:"last_updated_client"`
+}
+
+// draftActionResult is the JSON result of conversations_draft_message. DraftID
+// is the id of the draft that now exists at the destination, confirmed by
+// re-listing after every write — never an assumed id. Displaced is present
+// only on "replaced" and carries the pre-update content so it can be shown to
+// the user and restored. Note tells the calling agent what happened and what
+// to do next, so the response is self-describing.
+type draftActionResult struct {
+	Action    string        `json:"action"`
+	DraftID   string        `json:"draft_id"`
+	ChannelID string        `json:"channel_id"`
+	ThreadTS  string        `json:"thread_ts,omitempty"`
+	Draft     draftContent  `json:"draft"`
+	Displaced *draftContent `json:"displaced,omitempty"`
+	Note      string        `json:"note"`
+}
+
+// Note texts for draftActionResult. The existing-draft note spells out the
+// compare-then-consent protocol because the tool result is the only channel
+// through which the calling agent can learn what to do next. It deliberately
+// frames last_updated_client as a weak hint: this server reports as "Chrome"
+// (utls UA mimicry), and so does a user browsing Slack in Chrome, so that
+// field can never decide provenance — content comparison does.
+const (
+	draftNoteExistingFound = "An unsent draft already exists at this destination; nothing was written. Decide provenance by content, not by last_updated_client (a weak hint: this server and a user browsing Slack in Chrome both report \"Chrome\"): if draft.blocks_json is byte-identical to the blocks_json from your own last successful call for this destination, the draft is your own untouched work — re-call with overwrite=true. If it differs, or you never wrote here, show the user draft.text and get their explicit consent before re-calling with overwrite=true."
+	draftNoteReplaced      = "Replaced the existing draft at this destination. displaced carries the overwritten content: its blocks_json restores it exactly (text is display-only, never a restore source). draft is what Slack now holds, confirmed by re-listing; memorise its blocks_json to recognise this draft as your own on future calls."
+	draftNoteCreated       = "Created a new draft; no draft previously existed at this destination. draft is what Slack now holds, confirmed by re-listing; memorise its blocks_json to recognise this draft as your own on future calls."
+	draftNoteConflict      = "The draft was edited by another client between listing and updating, so Slack rejected the write; the draft survives intact and nothing was written. draft carries its current content and the consent protocol restarts from it: if its blocks_json is byte-identical to your own last write, re-call with overwrite=true; otherwise show the user draft.text and get their explicit consent first. Do not blindly retry."
+
+	// Mismatch variants: the confirming re-list found the draft, but its
+	// content differs from what was just sent — propagation lag or a concurrent
+	// edit. The note must not assert confirmation, and the agent must not
+	// memorise draft.blocks_json as its own confirmed write.
+	draftNoteReplacedMismatch = "Replaced the existing draft at this destination. displaced carries the overwritten content: its blocks_json restores it exactly (text is display-only, never a restore source). However, the confirming re-list returned content that differs from what was just sent — propagation lag or a concurrent edit by another client. draft is what the re-list returned; do not memorise its blocks_json as your own confirmed write. A later call for this destination will surface the draft's then-current content for comparison."
+	draftNoteCreatedMismatch  = "Created a new draft; no draft previously existed at this destination. However, the confirming re-list returned content that differs from what was just sent — propagation lag or a concurrent edit by another client. draft is what the re-list returned; do not memorise its blocks_json as your own confirmed write. A later call for this destination will surface the draft's then-current content for comparison."
+
+	// draftNoteListTruncated is appended to a create result's note when the
+	// pre-write listing came back exactly at draftsListLimit: the window may
+	// have hidden an existing draft at this destination, so "no draft
+	// previously existed" cannot be asserted confidently.
+	draftNoteListTruncated = "Caveat: the pre-write draft listing was truncated at the fetch limit, so an existing draft at this destination may have been missed and a duplicate created; check Slack's Drafts if exactly one draft matters here."
+)
 
 // draftsListLimit caps how many existing drafts we scan when looking for one to
 // replace. Drafts are a per-user, small set, so this is generous in practice.
@@ -348,7 +466,22 @@ func findDraftForDestination(drafts []edge.Draft, channel, threadTs string) (edg
 	return edge.Draft{}, false
 }
 
-// ConversationsDraftMessageHandler creates a native Slack draft and returns a CSV confirmation.
+// draftTargetsDestination reports whether one of the draft's destinations is
+// exactly the given channel and thread (tolerant of trailing-zero timestamp
+// widths, like findDraftForDestination).
+func draftTargetsDestination(d edge.Draft, channel, threadTs string) bool {
+	wantThread := normalizeTS(threadTs)
+	for _, dest := range d.Destinations {
+		if dest.ChannelID == channel && normalizeTS(dest.ThreadTS) == wantThread {
+			return true
+		}
+	}
+	return false
+}
+
+// ConversationsDraftMessageHandler creates or replaces a native Slack draft
+// under the compare-then-consent protocol and returns the JSON
+// draftActionResult.
 func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsDraftMessageHandler called", zap.Any("params", request.Params))
 
@@ -363,19 +496,30 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		return nil, err
 	}
 
+	// Defense in depth: registration already skips this tool for OAuth tokens
+	// (xoxp/xoxb), but a misconfigured setup could still route a call here.
+	// Drafts live behind the edge API, which only browser-session tokens can
+	// reach — explain that rather than failing obscurely downstream.
+	if ch.tokenIsOAuth() {
+		ch.logger.Error("Draft-message tool called with a non-session token")
+		return nil, errors.New("conversations_draft_message: drafts require a browser-session token (xoxc/xoxd); the configured token type cannot access Slack's drafts API")
+	}
+
 	// drafts.create (the Slack message composer) only accepts rich_text blocks;
 	// it silently drops section/header blocks. So, unlike conversations_add_message,
-	// the draft body must be a single rich_text block.
+	// the draft body must be a single rich_text block — or, for
+	// content_type application/json, a caller-supplied array of rich_text blocks.
 	var richText *slack.RichTextBlock
+	var blocksJSON json.RawMessage
 	switch params.contentType {
 	case "text/plain":
 		richText = plainRichTextBlock(params.text)
 	case "text/markdown":
-		converted, convErr := markdownToRichTextBlock(params.text)
+		converted, convErr := ch.convertMarkdownToRichText(params.text)
 		if convErr != nil {
 			ch.logger.Warn("Markdown parsing error, falling back to plain text", zap.Error(convErr))
 			richText = plainRichTextBlock(params.text)
-		} else if missing := draftContentLoss(params.text, converted); len(missing) > 0 {
+		} else if missing := ch.checkDraftContentLoss(params.text, converted); len(missing) > 0 {
 			// Refuse to create a draft that would silently drop content; surface
 			// the gap to the caller instead of producing a lossy draft.
 			ch.logger.Error("Draft conversion dropped content",
@@ -384,61 +528,311 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		} else {
 			richText = converted
 		}
+	case "application/json":
+		// Verbatim block JSON — the lossless restore path. The input is
+		// already-valid Slack blocks, not markdown, so the markdown converter
+		// and the loss check are bypassed entirely (the loss check would
+		// false-positive on content that was never markdown).
+		verbatim, vErr := parseVerbatimDraftBlocks(json.RawMessage(params.text))
+		if vErr != nil {
+			ch.logger.Error("Invalid application/json draft blocks", zap.Error(vErr))
+			return nil, fmt.Errorf("conversations_draft_message: %w", vErr)
+		}
+		blocksJSON = verbatim
 	default:
-		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
+		return nil, errors.New("content_type must be 'text/plain', 'text/markdown' or 'application/json'")
 	}
 
-	blocksJSON, err := json.Marshal([]slack.Block{richText})
-	if err != nil {
-		ch.logger.Error("Failed to marshal blocks", zap.Error(err))
-		return nil, err
+	if blocksJSON == nil {
+		blocksJSON, err = json.Marshal([]slack.Block{richText})
+		if err != nil {
+			ch.logger.Error("Failed to marshal blocks", zap.Error(err))
+			return nil, err
+		}
 	}
 
-	// Upsert by destination: drafts.create never replaces, so re-running this
-	// tool for a channel/thread that already has a draft would pile up
-	// duplicates. Instead, look for an existing draft at this destination and
-	// update it in place; only create a new one when none exists.
-	drafts, err := ch.apiProvider.Slack().DraftsList(ctx, draftsListLimit)
+	// Every call starts by listing drafts: the destination lookup is both the
+	// non-destructive default's read path and, on an authorized overwrite, the
+	// source of the concurrency token. Fail-safe invariant: a draft this
+	// lookup misses is never overwritten — the miss lands in the create branch
+	// and produces a visible, harmless duplicate.
+	drafts := ch.draftsClient()
+	listed, err := drafts.DraftsList(ctx, draftsListLimit)
 	if err != nil {
 		ch.logger.Error("Slack DraftsList failed", zap.Error(err))
 		return nil, err
 	}
 
-	var draftID string
-	if existing, found := findDraftForDestination(drafts, params.channel, params.threadTs); found {
+	result := draftActionResult{
+		ChannelID: params.channel,
+		ThreadTS:  params.threadTs,
+	}
+
+	var existing edge.Draft
+	var found bool
+	if params.draftID != "" {
+		// draft_id is targeting, not retargeting: the id must resolve within
+		// the listed drafts and its destination must match the requested
+		// channel/thread, which guarantees the channel policy check in
+		// parseParamsToolDraftMessage covered the draft actually touched.
+		existing, found = findDraftByID(listed, params.draftID)
+		if !found {
+			ch.logger.Warn("Requested draft_id not found among active drafts", zap.String("draft_id", params.draftID))
+			return nil, fmt.Errorf("conversations_draft_message: draft %q was not found among your active drafts (it may be stale, sent or deleted); nothing was written", params.draftID)
+		}
+		if !draftTargetsDestination(existing, params.channel, params.threadTs) {
+			ch.logger.Warn("Requested draft_id targets a different destination",
+				zap.String("draft_id", params.draftID),
+				zap.String("channel", params.channel),
+				zap.String("thread_ts", params.threadTs),
+			)
+			return nil, fmt.Errorf("conversations_draft_message: draft %s targets a different destination than the requested channel/thread; draft_id targets a draft, it never retargets one — nothing was written", params.draftID)
+		}
+	} else {
+		existing, found = findDraftForDestination(listed, params.channel, params.threadTs)
+	}
+
+	// A scheduled draft is a queued send and is never modified, regardless of
+	// overwrite and regardless of how the draft was resolved:
+	// findDraftForDestination skips scheduled drafts, and this guard keeps a
+	// known draft_id from bypassing that skip.
+	if found && existing.DateScheduled != 0 {
+		ch.logger.Warn("Refusing to touch scheduled draft", zap.String("draft_id", existing.ID))
+		return nil, fmt.Errorf("conversations_draft_message: draft %s is scheduled for sending and is never modified, regardless of overwrite; nothing was written", existing.ID)
+	}
+
+	// A draft addressed to more than one conversation is out of scope
+	// (functional spec §3) and never touched or read: overwriting it would
+	// silently drop the destinations beyond the requested one, and the channel
+	// policy check only covered the requested channel — the other destinations
+	// may be denied, so its content must not be returned either. Refuse before
+	// any content payload is built, regardless of overwrite and regardless of
+	// how the draft was resolved.
+	if found && len(existing.Destinations) > 1 {
+		ch.logger.Warn("Refusing to touch multi-destination draft",
+			zap.String("draft_id", existing.ID),
+			zap.Int("destinations", len(existing.Destinations)),
+		)
+		return nil, fmt.Errorf("conversations_draft_message: draft %s is addressed to more than one conversation; multi-destination drafts are out of scope and are never read or modified by this tool — manage it in Slack directly; nothing was written", existing.ID)
+	}
+
+	// Defensive: report the resolved draft's own matched destination thread_ts
+	// rather than echoing the request. Identical by construction today — a
+	// destination match is a precondition on every path that reports an
+	// existing draft — but if the matcher were ever loosened, the result must
+	// describe the draft actually resolved, not the request.
+	if found {
+		wantThread := normalizeTS(params.threadTs)
+		for _, dest := range existing.Destinations {
+			if dest.ChannelID == params.channel && normalizeTS(dest.ThreadTS) == wantThread {
+				result.ThreadTS = dest.ThreadTS
+				break
+			}
+		}
+	}
+
+	if found && !params.overwrite {
+		// Non-destructive default: a draft already sits at this destination
+		// and the caller has not asserted overwrite — write nothing and hand
+		// back the existing content so the agent can run compare-then-consent.
+		// This is a successful tool result, not an error: the caller must
+		// receive structured content (blocks_json to compare, text to show
+		// the user) and act on it.
+		content, cErr := draftContentPayload(existing)
+		if cErr != nil {
+			ch.logger.Error("Failed to decode existing draft content", zap.Error(cErr))
+			return nil, fmt.Errorf("conversations_draft_message: a draft (%s) already exists at this destination and nothing was written, but its content could not be decoded for review: %w", existing.ID, cErr)
+		}
+		ch.logger.Debug("Refusing to overwrite existing Slack draft",
+			zap.String("draft_id", existing.ID),
+			zap.String("channel", params.channel),
+			zap.String("thread_ts", params.threadTs),
+		)
+		result.Action = draftActionExistingFound
+		result.DraftID = existing.ID
+		result.Draft = content
+		result.Note = draftNoteExistingFound
+		return marshalDraftActionResult(result)
+	}
+
+	if found {
+		// Authorized overwrite. Capture the displaced content before touching
+		// anything: if it cannot be decoded it cannot be shown or restored,
+		// so the update must not happen.
+		displaced, cErr := draftContentPayload(existing)
+		if cErr != nil {
+			ch.logger.Error("Failed to decode draft content before overwrite", zap.Error(cErr))
+			return nil, fmt.Errorf("conversations_draft_message: refusing to overwrite draft %s because its current content could not be decoded for the displaced report: %w", existing.ID, cErr)
+		}
 		ch.logger.Debug("Replacing existing Slack draft",
 			zap.String("draft_id", existing.ID),
 			zap.String("channel", params.channel),
 			zap.String("thread_ts", params.threadTs),
 			zap.String("content_type", params.contentType),
 		)
-		if err := ch.apiProvider.Slack().DraftsUpdate(ctx, existing.ID, existing.ClientMsgID, existing.LastUpdatedTS, params.channel, params.threadTs, blocksJSON); err != nil {
+		if err := drafts.DraftsUpdate(ctx, existing.ID, existing.ClientMsgID, existing.LastUpdatedTS, params.channel, params.threadTs, blocksJSON); err != nil {
+			if errors.Is(err, edge.ErrDraftConflict) {
+				return ch.draftConflictResult(ctx, drafts, existing.ID, result)
+			}
 			ch.logger.Error("Slack DraftsUpdate failed", zap.Error(err))
 			return nil, err
 		}
-		draftID = existing.ID
-	} else {
-		ch.logger.Debug("Creating Slack draft",
-			zap.String("channel", params.channel),
-			zap.String("thread_ts", params.threadTs),
-			zap.String("content_type", params.contentType),
-		)
-		draftID, err = ch.apiProvider.Slack().DraftsCreate(ctx, params.channel, params.threadTs, blocksJSON)
+		confirmed, err := ch.confirmDraftWrite(ctx, drafts, existing.ID, fmt.Sprintf("update of draft %s", existing.ID))
 		if err != nil {
-			ch.logger.Error("Slack DraftsCreate failed", zap.Error(err))
 			return nil, err
 		}
+		content, cErr := draftContentPayload(confirmed)
+		if cErr != nil {
+			ch.logger.Error("Failed to decode confirmed draft content", zap.Error(cErr))
+			return nil, fmt.Errorf("conversations_draft_message: update of draft %s succeeded, but the confirming re-list returned content that could not be decoded: %w; verify the draft state in Slack", existing.ID, cErr)
+		}
+		result.Action = draftActionReplaced
+		result.DraftID = confirmed.ID
+		result.Draft = content
+		result.Displaced = &displaced
+		result.Note = draftNoteForWrite(blocksJSON, content.BlocksJSON, draftNoteReplaced, draftNoteReplacedMismatch)
+		return marshalDraftActionResult(result)
 	}
 
-	csvBytes, err := gocsv.MarshalBytes(&[]draftResult{{
-		DraftID:  draftID,
-		Channel:  params.channel,
-		ThreadTS: params.threadTs,
-	}})
+	// No draft at the destination — create, even when overwrite=true: the
+	// assertion permits replacing, it does not require something to replace.
+	ch.logger.Debug("Creating Slack draft",
+		zap.String("channel", params.channel),
+		zap.String("thread_ts", params.threadTs),
+		zap.String("content_type", params.contentType),
+	)
+	createdID, err := drafts.DraftsCreate(ctx, params.channel, params.threadTs, blocksJSON)
+	if err != nil {
+		ch.logger.Error("Slack DraftsCreate failed", zap.Error(err))
+		return nil, err
+	}
+	confirmed, err := ch.confirmDraftWrite(ctx, drafts, createdID, fmt.Sprintf("creation of draft %s", createdID))
 	if err != nil {
 		return nil, err
 	}
-	return mcp.NewToolResultText(string(csvBytes)), nil
+	content, cErr := draftContentPayload(confirmed)
+	if cErr != nil {
+		ch.logger.Error("Failed to decode confirmed draft content", zap.Error(cErr))
+		return nil, fmt.Errorf("conversations_draft_message: creation of draft %s succeeded, but the confirming re-list returned content that could not be decoded: %w; verify the draft state in Slack", createdID, cErr)
+	}
+	result.Action = draftActionCreated
+	result.DraftID = confirmed.ID
+	result.Draft = content
+	result.Note = draftNoteForWrite(blocksJSON, content.BlocksJSON, draftNoteCreated, draftNoteCreatedMismatch)
+	if len(listed) == draftsListLimit {
+		// The pre-write listing filled the whole window, so the destination
+		// lookup may have missed an existing draft beyond it — the note must
+		// not assert "no draft previously existed" confidently.
+		result.Note += " " + draftNoteListTruncated
+	}
+	return marshalDraftActionResult(result)
+}
+
+// draftNoteForWrite picks the note for a confirmed write: the confirming
+// re-list only proves the draft exists, so confirmation of *content* is a
+// byte comparison of the normalised sent blocks against the normalised
+// as-stored blocks (storedNormalized comes from draftContentPayload, already
+// normalised). Equal → the confirmed note may assert the draft is what was
+// sent; different → the mismatch note, which must not assert confirmation.
+func draftNoteForWrite(sentBlocks, storedNormalized json.RawMessage, confirmedNote, mismatchNote string) string {
+	sentNormalized, err := normalizeDraftBlocks(sentBlocks)
+	if err != nil || !bytes.Equal(sentNormalized, storedNormalized) {
+		return mismatchNote
+	}
+	return confirmedNote
+}
+
+// draftContentPayload normalises a listed draft's blocks and renders the
+// readable text for the result payload. A draft whose blocks are absent or
+// null (a listed draft with no content) is reported as empty content rather
+// than an error — otherwise the refusal path would dead-end in a bare error
+// the agent can neither review nor consent to.
+func draftContentPayload(d edge.Draft) (draftContent, error) {
+	if trimmed := bytes.TrimSpace(d.Blocks); len(trimmed) == 0 || string(trimmed) == "null" {
+		return draftContent{
+			Text:              "",
+			BlocksJSON:        json.RawMessage("[]"),
+			LastUpdatedClient: d.LastUpdatedClient,
+		}, nil
+	}
+	normalized, err := normalizeDraftBlocks(d.Blocks)
+	if err != nil {
+		return draftContent{}, fmt.Errorf("normalize blocks of draft %s: %w", d.ID, err)
+	}
+	return draftContent{
+		Text:              renderDraftBlocksText(normalized),
+		BlocksJSON:        normalized,
+		LastUpdatedClient: d.LastUpdatedClient,
+	}, nil
+}
+
+// findDraftByID returns the listed draft with the given id, skipping sent and
+// deleted entries.
+func findDraftByID(drafts []edge.Draft, id string) (edge.Draft, bool) {
+	for _, d := range drafts {
+		if d.ID == id && !d.IsSent && !d.IsDeleted {
+			return d, true
+		}
+	}
+	return edge.Draft{}, false
+}
+
+// confirmDraftWrite re-lists drafts after a successful create/update and
+// returns the as-stored entry for draftID. The re-list — not the write call's
+// response — is what the result reports, so what the agent memorises for
+// future comparison is what Slack actually holds. writeDesc names the write
+// that succeeded, for the honest error when confirmation fails.
+func (ch *ConversationsHandler) confirmDraftWrite(ctx context.Context, drafts draftsAPI, draftID, writeDesc string) (edge.Draft, error) {
+	listed, err := drafts.DraftsList(ctx, draftsListLimit)
+	if err != nil {
+		ch.logger.Error("Confirming DraftsList failed after draft write", zap.String("draft_id", draftID), zap.Error(err))
+		return edge.Draft{}, fmt.Errorf("conversations_draft_message: %s succeeded, but the confirming drafts.list failed: %v; verify the draft state in Slack before retrying", writeDesc, err)
+	}
+	d, ok := findDraftByID(listed, draftID)
+	if !ok {
+		ch.logger.Error("Confirming re-list could not find written draft", zap.String("draft_id", draftID))
+		return edge.Draft{}, fmt.Errorf("conversations_draft_message: %s succeeded, but the confirming re-list could not find the draft; verify the draft state in Slack before retrying", writeDesc)
+	}
+	return d, nil
+}
+
+// draftConflictResult handles edge.ErrDraftConflict from drafts.update: the
+// draft was edited by another client between our listing and our write, so
+// Slack rejected the update and the draft survives intact. The write is never
+// retried — the content the caller compared against is now stale. Instead the
+// draft is re-listed and its current content returned as a successful
+// "conflict" result, restarting the consent protocol from fresh state.
+func (ch *ConversationsHandler) draftConflictResult(ctx context.Context, drafts draftsAPI, draftID string, result draftActionResult) (*mcp.CallToolResult, error) {
+	ch.logger.Warn("Draft was edited concurrently; Slack rejected the update", zap.String("draft_id", draftID))
+	listed, err := drafts.DraftsList(ctx, draftsListLimit)
+	if err != nil {
+		ch.logger.Error("Re-list after draft conflict failed", zap.String("draft_id", draftID), zap.Error(err))
+		return nil, fmt.Errorf("conversations_draft_message: draft %s was edited by another client and the update was rejected (the draft survives intact), but re-listing its current content failed: %v", draftID, err)
+	}
+	current, ok := findDraftByID(listed, draftID)
+	if !ok {
+		ch.logger.Error("Re-list after draft conflict could not find the draft", zap.String("draft_id", draftID))
+		return nil, fmt.Errorf("conversations_draft_message: draft %s was edited by another client and the update was rejected, but the re-list could not find it; verify the draft state in Slack", draftID)
+	}
+	content, cErr := draftContentPayload(current)
+	if cErr != nil {
+		ch.logger.Error("Failed to decode conflicting draft content", zap.Error(cErr))
+		return nil, fmt.Errorf("conversations_draft_message: draft %s was edited by another client and the update was rejected, but its current content could not be decoded: %w", draftID, cErr)
+	}
+	result.Action = draftActionConflict
+	result.DraftID = current.ID
+	result.Draft = content
+	result.Note = draftNoteConflict
+	return marshalDraftActionResult(result)
+}
+
+// marshalDraftActionResult renders the JSON tool result for the draft handler.
+func marshalDraftActionResult(r draftActionResult) (*mcp.CallToolResult, error) {
+	b, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	return mcp.NewToolResultText(string(b)), nil
 }
 
 // ConversationsMarkHandler marks one or more conversations as read
@@ -2070,9 +2464,9 @@ func (ch *ConversationsHandler) parseParamsToolDraftMessage(ctx context.Context,
 	}
 
 	contentType := request.GetString("content_type", "text/markdown")
-	if contentType != "text/plain" && contentType != "text/markdown" {
+	if contentType != "text/plain" && contentType != "text/markdown" && contentType != "application/json" {
 		ch.logger.Error("Invalid content_type", zap.String("content_type", contentType))
-		return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
+		return nil, errors.New("content_type must be 'text/plain', 'text/markdown' or 'application/json'")
 	}
 
 	return &draftMessageParams{
@@ -2080,6 +2474,8 @@ func (ch *ConversationsHandler) parseParamsToolDraftMessage(ctx context.Context,
 		threadTs:    threadTs,
 		text:        msgText,
 		contentType: contentType,
+		overwrite:   request.GetBool("overwrite", false),
+		draftID:     request.GetString("draft_id", ""),
 	}, nil
 }
 

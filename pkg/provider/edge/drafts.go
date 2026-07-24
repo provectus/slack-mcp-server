@@ -3,6 +3,7 @@ package edge
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/trace"
@@ -101,16 +102,20 @@ func (cl *Client) DraftsCreate(ctx context.Context, channelID, threadTs string, 
 	return id, nil
 }
 
-// Draft is a single entry from drafts.list. Only the fields needed to detect a
-// duplicate draft for a destination and to drive drafts.update are decoded.
+// Draft is a single entry from drafts.list. Decoded fields cover duplicate
+// detection for a destination, driving drafts.update, and the draft's content
+// body; other returned fields (is_from_composer, date_created, file_ids,
+// team_id, user_id) stay undecoded until needed.
 type Draft struct {
-	ID            string             `json:"id"`
-	ClientMsgID   string             `json:"client_msg_id"`
-	LastUpdatedTS string             `json:"last_updated_ts"`
-	DateScheduled int64              `json:"date_scheduled"`
-	IsSent        bool               `json:"is_sent"`
-	IsDeleted     bool               `json:"is_deleted"`
-	Destinations  []DraftDestination `json:"destinations"`
+	ID                string             `json:"id"`
+	ClientMsgID       string             `json:"client_msg_id"`
+	LastUpdatedTS     string             `json:"last_updated_ts"`
+	LastUpdatedClient string             `json:"last_updated_client"`
+	DateScheduled     int64              `json:"date_scheduled"`
+	IsSent            bool               `json:"is_sent"`
+	IsDeleted         bool               `json:"is_deleted"`
+	Destinations      []DraftDestination `json:"destinations"`
+	Blocks            json.RawMessage    `json:"blocks"`
 }
 
 type draftsListForm struct {
@@ -184,6 +189,16 @@ func padDraftTS(ts string) string {
 	return ts[:i+1] + frac
 }
 
+// ErrDraftConflict reports that drafts.update rejected the write because the
+// supplied client_last_updated_ts was stale — the draft was edited by another
+// client between listing and updating. The draft itself survives intact.
+// Match with errors.Is.
+var ErrDraftConflict = errors.New("draft has conflict (stale client_last_updated_ts)")
+
+// draftHasConflictErr is the literal API error string Slack returns from
+// drafts.update on a stale client_last_updated_ts.
+const draftHasConflictErr = "draft_has_conflict"
+
 type draftsUpdateForm struct {
 	BaseRequest
 	DraftID             string `json:"draft_id"`
@@ -240,5 +255,14 @@ func (cl *Client) DraftsUpdate(ctx context.Context, draftID, clientMsgID, lastUp
 	if err := cl.ParseResponse(&r, resp); err != nil {
 		return err
 	}
-	return r.validate("drafts.update")
+	if err := r.validate("drafts.update"); err != nil {
+		// Contains, not equality: a decorated variant of the error string
+		// (undocumented endpoint) must still map to ErrDraftConflict.
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && strings.Contains(apiErr.Err, draftHasConflictErr) {
+			return fmt.Errorf("drafts.update: %w", ErrDraftConflict)
+		}
+		return err
+	}
+	return nil
 }
