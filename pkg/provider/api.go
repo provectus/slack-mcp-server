@@ -1329,7 +1329,15 @@ func (ap *ApiProvider) fetchAndStoreChannels(ctx context.Context) error {
 	ap.fetchChannelsMu.Lock()
 	defer ap.fetchChannelsMu.Unlock()
 
-	channels := ap.GetChannels(ctx, AllChanTypes)
+	channels, err := ap.GetChannels(ctx, AllChanTypes)
+
+	if err != nil {
+		if ap.channelsReady.Load() {
+			ap.logger.Warn("Channel refresh failed, keeping existing cache", zap.Error(err))
+			return nil
+		}
+		return fmt.Errorf("channel refresh failed and no existing cache is available: %w", err)
+	}
 
 	if len(channels) == 0 {
 		if ap.channelsReady.Load() {
@@ -1603,11 +1611,7 @@ func (ap *ApiProvider) GetSlackConnect(ctx context.Context) ([]slack.User, error
 	return res, nil
 }
 
-func (ap *ApiProvider) GetChannelsType(ctx context.Context, channelType string) []Channel {
-	return ap.getChannelsMultiType(ctx, []string{channelType})
-}
-
-func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []string) []Channel {
+func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []string) ([]Channel, error) {
 	params := &slack.GetConversationsParameters{
 		Types:           channelTypes,
 		Limit:           999,
@@ -1625,7 +1629,7 @@ func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []
 	for {
 		if err := ap.rateLimiter.Wait(ctx); err != nil {
 			ap.logger.Error("Rate limiter wait failed", zap.Error(err))
-			return nil
+			return nil, err
 		}
 
 		channels, nextcur, err = ap.client.GetConversationsContext(ctx, params)
@@ -1635,7 +1639,7 @@ func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []
 		)
 		if err != nil {
 			ap.logger.Error("Failed to fetch channels", zap.Error(err))
-			break
+			return nil, err
 		}
 
 		for _, channel := range channels {
@@ -1664,10 +1668,10 @@ func (ap *ApiProvider) getChannelsMultiType(ctx context.Context, channelTypes []
 
 		params.Cursor = nextcur
 	}
-	return chans
+	return chans, nil
 }
 
-func (ap *ApiProvider) GetChannels(ctx context.Context, channelTypes []string) []Channel {
+func (ap *ApiProvider) GetChannels(ctx context.Context, channelTypes []string) ([]Channel, error) {
 	if len(channelTypes) == 0 {
 		channelTypes = AllChanTypes
 	}
@@ -1676,7 +1680,11 @@ func (ap *ApiProvider) GetChannels(ctx context.Context, channelTypes []string) [
 	// conversations.list API supports multiple types per request, and the edge
 	// API (Enterprise Grid + non-OAuth) returns all types regardless. This
 	// avoids making 4 separate API round-trips (one per type).
-	chans := ap.getChannelsMultiType(ctx, AllChanTypes)
+	chans, err := ap.getChannelsMultiType(ctx, AllChanTypes)
+	if err != nil {
+		// Do not overwrite the existing snapshot with a partial/empty list.
+		return nil, err
+	}
 
 	// Merge unread info from ClientCounts if edge client is available
 	if counts := ap.fetchChannelCounts(ctx); counts != nil {
@@ -1719,7 +1727,7 @@ func (ap *ApiProvider) GetChannels(ctx context.Context, channelTypes []string) [
 		}
 	}
 
-	return res
+	return res, nil
 }
 
 func (ap *ApiProvider) ProvideUsersMap() *UsersCache {
