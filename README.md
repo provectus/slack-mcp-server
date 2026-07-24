@@ -174,7 +174,7 @@ Creates or updates a native Slack **draft** in a channel, DM, or thread. The dra
 | `channel_id`   | string  | Yes      | `Cxxxxxxxxxx`, `#channel`, or `@username_dm`.                               |
 | `thread_ts`    | string  | No       | Thread parent timestamp `1234567890.123456`. If set, draft is a reply.      |
 | `text`         | string  | Yes      | Message text in `content_type` format. For `application/json`, verbatim Slack `rich_text` block JSON (e.g. a `blocks_json` previously returned by this tool). |
-| `content_type` | string  | No       | `text/markdown` (default), `text/plain`, or `application/json` — the lossless restore path: the block JSON is stored exactly as given. |
+| `content_type` | string  | No       | `text/markdown` (default), `text/plain`, or `application/json` — the lossless restore path: rich_text block JSON, normalized before storage (block_id stripped, keys canonicalized). |
 | `overwrite`    | boolean | No       | Default `false`. Assertion that the caller has seen the draft currently at the destination and is authorized to replace it. Without it, an existing draft is never modified. |
 | `draft_id`     | string  | No       | Target a specific draft by id (from a previous result) instead of resolving by destination. Targeting only, never retargeting: the draft's destination must still match `channel_id`/`thread_ts`. |
 

@@ -310,7 +310,13 @@ func TestLiveDraftsUpsertStability(t *testing.T) {
 			t.Fatalf("FINDING: round %d — findDraftForDestination MISSED; the handler would create a duplicate here", round)
 		}
 		if existing.ID != id0 {
-			t.Errorf("FINDING: round %d matched a DIFFERENT draft %s (expected %s)", round, existing.ID, id0)
+			// Abort before writing: a match on a draft this probe did not
+			// create means drafts.list surfaced a real pre-existing draft at
+			// this destination ahead of ours. Updating it would overwrite the
+			// user's own content, and its id was never tracked for cleanup —
+			// exactly the safety rule this file forbids breaking.
+			dump(t, "state at mismatch", ds)
+			t.Fatalf("FINDING: round %d matched a DIFFERENT draft %s (expected %s) — refusing to write to avoid mutating a draft this probe did not create", round, existing.ID, id0)
 		}
 		if err := cl.DraftsUpdate(ctx, existing.ID, existing.ClientMsgID, existing.LastUpdatedTS, dm, "", blocksFor("upsert probe round "+strconv.Itoa(round))); err != nil {
 			t.Fatalf("round %d update failed: %v", round, err)

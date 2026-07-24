@@ -252,7 +252,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			mcp.WithString("content_type",
 				mcp.DefaultString("text/markdown"),
 				mcp.Enum("text/markdown", "text/plain", "application/json"),
-				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain', 'application/json'. With 'application/json' the text is verbatim Slack rich_text block JSON — e.g. a blocks_json previously returned by this tool — stored exactly as given; this is the lossless restore path (every element must be a rich_text block)."),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain', 'application/json'. With 'application/json' the text is Slack rich_text block JSON — e.g. a blocks_json previously returned by this tool — normalized before storage (block_id stripped, object keys canonicalized); this is the lossless restore path for normalized block content (every element must be a rich_text block)."),
 			),
 			mcp.WithBoolean("overwrite",
 				mcp.DefaultBool(false),
