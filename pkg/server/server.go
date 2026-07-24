@@ -237,7 +237,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 	// only register for non-OAuth (session) tokens.
 	if !provider.IsOAuth() && shouldAddTool(ToolConversationsDraftMessage, enabledTools, "SLACK_MCP_DRAFT_MESSAGE_TOOL") {
 		s.AddTool(mcp.NewTool(ToolConversationsDraftMessage,
-			mcp.WithDescription("Create or replace a native Slack draft message in a channel, DM, or thread. If a draft already exists for the same channel/thread it is replaced in place (so re-running this to edit a draft updates it rather than creating duplicates); otherwise a new draft is created. The draft is saved to the user's Drafts and is NOT sent automatically. Requires a session token (xoxc/xoxd); not available with bot or OAuth (xoxp) tokens."),
+			mcp.WithDescription("Create or update a native Slack draft message in a channel, DM, or thread. Non-destructive by default: if a draft already exists at the destination, nothing is written and its content is returned (action: existing_draft_found). Then compare the returned blocks_json against the blocks_json from your own last successful call for this destination — byte-identical means it is your own untouched draft, so re-call with overwrite: true without asking the user; different, or you never wrote there, means show the user the readable text and get their explicit consent before re-calling with overwrite: true. blocks_json is the authoritative content; text is display-only — never restore or compare from text. To restore displaced content exactly, re-call with content_type: application/json and the saved blocks_json as text; replaced results include the displaced content for exactly that purpose. Scheduled drafts are never replaced or deleted under any circumstances. Requires a session token (xoxc/xoxd); drafts are saved to the user's Drafts and NOT sent automatically."),
 			mcp.WithTitleAnnotation("Draft Message"),
 			mcp.WithString("channel_id",
 				mcp.Required(),
@@ -251,7 +251,15 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			),
 			mcp.WithString("content_type",
 				mcp.DefaultString("text/markdown"),
-				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'."),
+				mcp.Enum("text/markdown", "text/plain", "application/json"),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain', 'application/json'. With 'application/json' the text is verbatim Slack rich_text block JSON — e.g. a blocks_json previously returned by this tool — stored exactly as given; this is the lossless restore path (every element must be a rich_text block)."),
+			),
+			mcp.WithBoolean("overwrite",
+				mcp.DefaultBool(false),
+				mcp.Description("Assertion that you have seen the draft currently at this destination and are authorized to replace it. Default false: if a draft already exists there, nothing is written and its content is returned (action: existing_draft_found) for you to compare against your own last write and, if it differs, show to the user. Pass true only after that comparison shows the draft is your own, or with the user's explicit consent."),
+			),
+			mcp.WithString("draft_id",
+				mcp.Description("Target a specific draft by id (as returned in a previous result) instead of resolving by destination. Targeting only, never retargeting: the draft's destination must still match channel_id/thread_ts, and a mismatch or unknown id is an error with nothing written. Scheduled drafts are never modified."),
 			),
 		), conversationsHandler.ConversationsDraftMessageHandler)
 	}

@@ -16,7 +16,7 @@ This feature-rich Slack MCP Server has:
 - **Unread Messages**: Get all unread messages across channels efficiently with priority sorting (DMs > partner channels > internal), @mention filtering, and mark-as-read support.
 - **Search Messages**: Search messages in channels, threads, and DMs using various filters like date, user, content, and emoji reactions (`has:`/`hasmy:`).
 - **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions. Markdown payloads render as native Slack `rich_text` formatting.
-- **Native Drafts**: The `conversations_draft_message` tool creates or replaces Slack drafts (saved to your Drafts, never auto-sent). Re-running it for the same channel/thread updates the existing draft in place rather than piling up duplicates. Disabled by default; enable via `SLACK_MCP_DRAFT_MESSAGE_TOOL`. Requires a session token (`xoxc`/`xoxd`).
+- **Native Drafts**: The `conversations_draft_message` tool creates or updates Slack drafts (saved to your Drafts, never auto-sent). Non-destructive by default: an existing draft at the destination is never overwritten without an explicit `overwrite: true` assertion — its content is returned instead, so nothing you wrote by hand is ever silently lost. Disabled by default; enable via `SLACK_MCP_DRAFT_MESSAGE_TOOL`. Requires a session token (`xoxc`/`xoxd`).
 - **DM and Group DM support**: Retrieve direct messages and group direct messages.
 - **Embedded user information**: Embed user information in messages, for better context.
 - **Cache support**: Cache users and channels for faster access, isolated per workspace (`TeamID`-prefixed) with a configurable TTL and background refresh that merges fresh channel counts instead of re-listing everything.
@@ -167,16 +167,34 @@ Mark one or more conversations (channels, DMs, or groups) as read up to a specif
 
 ### 9. conversations_draft_message:
 
-Creates or replaces a native Slack **draft** in a channel, DM, or thread. The draft appears in the user's Slack "Drafts" list and is **never sent automatically** — the user reviews and sends it from Slack.
+Creates or updates a native Slack **draft** in a channel, DM, or thread. The draft appears in the user's Slack "Drafts" list and is **never sent automatically** — the user reviews and sends it from Slack.
 
-| Argument       | Type   | Required | Description                                                                 |
-|----------------|--------|----------|-----------------------------------------------------------------------------|
-| `channel_id`   | string | Yes      | `Cxxxxxxxxxx`, `#channel`, or `@username_dm`.                               |
-| `thread_ts`    | string | No       | Thread parent timestamp `1234567890.123456`. If set, draft is a reply.      |
-| `text`         | string | Yes      | Message text in `content_type` format.                                      |
-| `content_type` | string | No       | `text/markdown` (default) or `text/plain`.                                  |
+| Argument       | Type    | Required | Description                                                                 |
+|----------------|---------|----------|-----------------------------------------------------------------------------|
+| `channel_id`   | string  | Yes      | `Cxxxxxxxxxx`, `#channel`, or `@username_dm`.                               |
+| `thread_ts`    | string  | No       | Thread parent timestamp `1234567890.123456`. If set, draft is a reply.      |
+| `text`         | string  | Yes      | Message text in `content_type` format. For `application/json`, verbatim Slack `rich_text` block JSON (e.g. a `blocks_json` previously returned by this tool). |
+| `content_type` | string  | No       | `text/markdown` (default), `text/plain`, or `application/json` — the lossless restore path: the block JSON is stored exactly as given. |
+| `overwrite`    | boolean | No       | Default `false`. Assertion that the caller has seen the draft currently at the destination and is authorized to replace it. Without it, an existing draft is never modified. |
+| `draft_id`     | string  | No       | Target a specific draft by id (from a previous result) instead of resolving by destination. Targeting only, never retargeting: the draft's destination must still match `channel_id`/`thread_ts`. |
 
-> **Upsert by destination:** there is only ever one draft per channel/thread. If a draft already exists for the target `channel_id` (and `thread_ts`), this tool **replaces it in place** instead of creating a duplicate — so re-running it to edit a draft updates the existing one. A new draft is created only when none exists. Drafts that have already been sent, deleted, or scheduled are left untouched.
+> **Non-destructive by default:** if a draft already exists at the destination and `overwrite` is not set, **nothing is written** — the result carries `action: existing_draft_found` and the existing draft's content, so the caller can compare it against its own last write (byte-identical `blocks_json` → its own untouched draft → re-call with `overwrite: true`) or show the user the readable `text` and get consent. `blocks_json` is the authoritative content; `text` is a display-only rendering, never a restore source. Scheduled drafts are never replaced or deleted under any circumstances.
+
+- **Returns:** a JSON object:
+
+  ```json
+  {
+    "action": "created | replaced | existing_draft_found | conflict",
+    "draft_id": "Dr...",
+    "channel_id": "C...",
+    "thread_ts": "1234567890.123456",
+    "draft":     { "text": "...", "blocks_json": [ ... ], "last_updated_client": "..." },
+    "displaced": { "text": "...", "blocks_json": [ ... ], "last_updated_client": "..." },
+    "note": "what happened and what to do next"
+  }
+  ```
+
+  `draft` is the content Slack actually holds after the call, confirmed by re-listing. `displaced` appears only on `replaced` and carries the overwritten content — restore it exactly by re-calling with `content_type: application/json` and its `blocks_json` as `text`. `action: conflict` means the draft was edited in Slack mid-call; the write was rejected, the draft survives, and the consent protocol restarts from the returned content. `last_updated_client` is a weak hint only — provenance is decided by content comparison, never by that field.
 
 > **Where the draft shows up:** the draft lives in Slack's **Drafts** list (left sidebar) — open it from there to view, edit, or send it. Slack's desktop channel composer does not auto-attach drafts created via the API, so use the Drafts list to access it.
 

@@ -1,7 +1,7 @@
 # Technical Specification: Safe Slack Draft Lifecycle
 
 - **Functional Specification:** [functional-spec.md](./functional-spec.md)
-- **Status:** Draft
+- **Status:** Completed
 - **Author(s):** Aleksandr Makarov
 
 ---
@@ -165,4 +165,4 @@ Live probes: the consolidated `drafts_probe_test.go` (§2.11) stays behind the `
 
 ## Change Log
 
-_No amendments yet._
+- 2026-07-24 — §2.9's schema-size argument for extending `content_type` (rather than adding a `blocks` parameter) no longer holds: the tool description grew roughly fivefold and two parameters (`overwrite`, `draft_id`) were added. The structural-exclusivity argument — one content input, three interpretations, no ambiguity about which wins — still stands on its own.

@@ -109,3 +109,36 @@ This is strictly better than the server-side provenance ledger first considered:
 **Claims spot-checked against the code** (per the flow's rule that a subagent report is a claim, not a fact): `parseParamsToolDraftMessage` at `conversations.go:360` does precede `DraftsList` at `:401`; `server.go:238` does gate registration on `!provider.IsOAuth()`. Both hold, so the spec's gating-safety argument stands.
 
 **Next stage:** `/awos:implement`.
+
+---
+
+## 2026-07-23 — Implementation
+
+**Slice 1 (edge client reads draft body) — done.** `Draft` gains `Blocks` and `LastUpdatedClient`; `ErrDraftConflict` sentinel added, mapped inside `DraftsUpdate` only (via `errors.As` on `*APIError`), leaving `baseResponse.validate` and every other endpoint untouched. Two tests added.
+
+Claims spot-checked: the conflict mapping is scoped to `DraftsUpdate` as reported (`drafts.go:258-265`), and `ErrDraftConflict` is a plain sentinel wrapped with `%w`. Both hold.
+
+### Repo defect found: `make test` silently skips most tests
+
+`Makefile:59` is `$(GO) test -count=1 -v -run=".*Unit.*" ./...` — only tests whose **name contains "Unit"** ever execute. This is also what the CI "Unit Tests" check runs. Pre-existing tests such as `TestBuildDraftDestinations` and `TestPadDraftTS` in `pkg/provider/edge/drafts_test.go` have therefore never gated anything, locally or in CI.
+
+Consequence for this feature: every test added must be named `TestUnit*` or it is decorative. All slice agents are being told this explicitly.
+
+This is a **pre-existing repo defect, not a defect in this feature**, and widening the filter would make an unknown number of currently-unrun tests start running — plausibly red — which is out of scope here. Recorded for the maintainer as a follow-up.
+
+---
+
+## 2026-07-24 — Verify + local review
+
+**Verify:** all 22 acceptance criteria marked `[x]`; both specs `Status: Completed`. Evidence: 208 unit tests (0 fail), and four live probes green against real Slack (self-DM, self-cleaning). Coverage gap caught during verification — §2.4's "a revision stays in its thread" was captured by the mock but never asserted; added `TestUnitDraftLifecycleThreadedRevisionStaysThreaded` (red-validated) before marking complete. Product context needs no update (no new service/persistence/dependency).
+
+**Local review** (independent `pr-review-toolkit:code-reviewer`, diff-only, fixed prompt) → `review.md`. Verdict: approve with changes, no blocker. 3 medium, 6 low, 3 nits. User accepted ALL findings. Applied across two focused agents (safety-critical first, then mechanical) after the first combined attempt timed out having written nothing:
+
+- **M1/M2 (multi-destination)** — read-side matchers match on any destination; write side (`buildDraftDestinations`) always rebuilds a single-element array. So overwriting a multi-destination draft dropped the others (data loss, §2.3), and a draft targeting an allowed + a denied channel was reachable via the allowed one and its content returned (policy leak, §2.5). Fixed by refusing multi-destination drafts with a Go error placed before any content payload is built, on both resolution paths. Verified by reading the handler: guard at conversations.go:579, first `draftContentPayload` at :594.
+- **M3** — re-list confirmed existence, not content; the note asserted "confirmed" regardless. Now diffs stored vs sent blocks and reports a mismatch honestly (no extra API call).
+- **L4** — null/absent blocks turned the refusal into an un-actionable dead end; now treated as empty content so the agent can still review/consent.
+- **L1/L2/L3/L5/L6, N1/N2/N3** — test seams moved from mutable package globals to handler struct fields; `draft_has_conflict` matched by `strings.Contains`; `content_type` gained `mcp.Enum`; list-window truncation now noted; renderer paragraph spacing; defensive `ThreadTS` source; spec change-log note that §2.9's schema-size argument no longer holds.
+
+Post-fix: 208 tests (0 fail), `go vet ./...` and `go vet -tags liveprobe ./pkg/provider/edge/` clean, `make build` ok, live probes still green, no leftover test mutations.
+
+**Next stage:** commit-push, then PR against provectus/slack-mcp-server.

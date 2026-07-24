@@ -1,8 +1,13 @@
 package edge
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -159,6 +164,90 @@ func TestDraftsListResponseParsing(t *testing.T) {
 	if !d1.IsSent || d1.Destinations[0].ThreadTS != "1700000000.000001" {
 		t.Errorf("draft[1] decoded wrong: %+v", d1)
 	}
+}
+
+func TestUnitDraftsListResponseDecodesBody(t *testing.T) {
+	// Recorded drafts.list entry shape (trimmed to one draft): includes fields
+	// the Draft struct deliberately leaves undecoded (is_from_composer,
+	// date_created, file_ids, team_id, user_id) to prove decoding tolerates
+	// them.
+	blocks := `[{"block_id":"kjNyw","elements":[{"elements":[{"text":"hello","type":"text"}],"type":"rich_text_section"}],"type":"rich_text"}]`
+	body := `{"ok":true,"drafts":[{"id":"Dr1","client_msg_id":"cm-1","blocks":` + blocks + `,"destinations":[{"broadcast":false,"channel_id":"D0A8P7UEQV8","thread_ts":"1784730669.577499","user_ids":["U0A8SRKAB0C"]}],"file_ids":[],"is_sent":false,"is_deleted":false,"is_from_composer":true,"date_created":1784730000,"date_scheduled":0,"last_updated_ts":"1784730669.1234567","last_updated_client":"Slack SSB Mac (Atom)","team_id":"T123","user_id":"U0A8SRKAB0C"}],"has_more":false}`
+
+	var r draftsListResponse
+	if err := json.Unmarshal([]byte(body), &r); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(r.Drafts) != 1 {
+		t.Fatalf("got %d drafts, want 1", len(r.Drafts))
+	}
+	d := r.Drafts[0]
+	if got := string(d.Blocks); got != blocks {
+		t.Errorf("Blocks = %s, want %s", got, blocks)
+	}
+	if d.LastUpdatedClient != "Slack SSB Mac (Atom)" {
+		t.Errorf("LastUpdatedClient = %q, want %q", d.LastUpdatedClient, "Slack SSB Mac (Atom)")
+	}
+}
+
+// fakeHTTPClient satisfies the httpClient interface with a canned response.
+type fakeHTTPClient struct {
+	body string
+}
+
+func (f *fakeHTTPClient) Do(*http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body:       io.NopCloser(strings.NewReader(f.body)),
+		Header:     make(http.Header),
+	}, nil
+}
+
+func TestUnitDraftsUpdateConflictError(t *testing.T) {
+	newClient := func(body string) *Client {
+		return &Client{
+			cl:           &fakeHTTPClient{body: body},
+			webclientAPI: "https://example.com/api/",
+			token:        "xoxc-test",
+		}
+	}
+	update := func(cl *Client) error {
+		return cl.DraftsUpdate(context.Background(), "Dr1", "cm-1", "1700000000.0001", "C123", "", json.RawMessage(`[{"type":"rich_text"}]`))
+	}
+
+	t.Run("draft_has_conflict maps to ErrDraftConflict", func(t *testing.T) {
+		err := update(newClient(`{"ok":false,"error":"draft_has_conflict"}`))
+		if !errors.Is(err, ErrDraftConflict) {
+			t.Fatalf("errors.Is(err, ErrDraftConflict) = false, err = %v", err)
+		}
+	})
+
+	t.Run("decorated conflict string still maps to ErrDraftConflict", func(t *testing.T) {
+		err := update(newClient(`{"ok":false,"error":"draft_has_conflict (edited elsewhere)"}`))
+		if !errors.Is(err, ErrDraftConflict) {
+			t.Fatalf("errors.Is(err, ErrDraftConflict) = false for decorated conflict string, err = %v", err)
+		}
+	})
+
+	t.Run("unrelated error does not match", func(t *testing.T) {
+		err := update(newClient(`{"ok":false,"error":"invalid_auth"}`))
+		if err == nil {
+			t.Fatal("expected an error")
+		}
+		if errors.Is(err, ErrDraftConflict) {
+			t.Fatalf("errors.Is(err, ErrDraftConflict) = true for unrelated error %v", err)
+		}
+		var apiErr *APIError
+		if !errors.As(err, &apiErr) || apiErr.Err != "invalid_auth" {
+			t.Errorf("unrelated error not preserved as *APIError: %v", err)
+		}
+	})
+
+	t.Run("ok response returns nil", func(t *testing.T) {
+		if err := update(newClient(`{"ok":true}`)); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestDraftsCreateFormValues(t *testing.T) {
