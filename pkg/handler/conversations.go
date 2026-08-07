@@ -152,11 +152,12 @@ type ConversationsHandler struct {
 	// lets handler tests record draft calls without a network-backed client.
 	drafts draftsAPI
 	// markdownToRichTextBlockFn and draftContentLossFn override the markdown
-	// pipeline of the draft-message handler; nil means use the real
-	// markdownToRichTextBlock / draftContentLoss. Set only by tests, so they
-	// can prove the application/json content type bypasses conversion and the
-	// loss check entirely (its input is already-valid Slack blocks, not
-	// markdown).
+	// pipeline of the draft-message and add-message handlers; nil means use the
+	// real markdownToRichTextBlock / draftContentLoss. Set only by tests, so
+	// they can prove the application/json content type bypasses conversion and
+	// the loss check entirely (its input is already-valid Slack blocks, not
+	// markdown), and reach the add-message conversion-error fallback, which no
+	// real markdown input reliably triggers.
 	markdownToRichTextBlockFn func(markdown string) (*slack.RichTextBlock, error)
 	draftContentLossFn        func(input string, rtb *slack.RichTextBlock) []string
 	// isOAuthTokenFn overrides the provider's token-type check in the
@@ -164,6 +165,18 @@ type ConversationsHandler struct {
 	// tests, to simulate a non-session (OAuth) token without a network-built
 	// client.
 	isOAuthTokenFn func() bool
+	// mentions overrides the mention directory the handlers verify and name
+	// mentions against; nil means build one from apiProvider. Set only by
+	// tests, so validation and readback assertions run against a fixed table
+	// instead of a live workspace. ApiProvider.client is unexported, so this
+	// handler-level field — not a provider seam — is where a test observes
+	// mention lookups.
+	mentions mentionResolver
+	// postMessages overrides the client conversations_add_message posts
+	// through; nil means use apiProvider.Slack(). Set only by tests, mirroring
+	// the drafts seam: it is what lets a test assert that a refused mention
+	// posted nothing at all.
+	postMessages postMessageAPI
 }
 
 func NewConversationsHandler(apiProvider *provider.ApiProvider, logger *zap.Logger) *ConversationsHandler {
@@ -256,7 +269,9 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 
 	if params.blocks != nil {
 		// Raw blocks provided: use them directly. If text is also provided, it
-		// serves as the notification/fallback text.
+		// serves as the notification/fallback text. Caller-supplied blocks are a
+		// verbatim path and are never mention-validated, for the same reason the
+		// drafts tool exempts application/json.
 		options = append(options, slack.MsgOptionBlocks(params.blocks...))
 		if params.text != "" {
 			options = append(options, slack.MsgOptionText(params.text, false))
@@ -264,22 +279,58 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 	} else {
 		switch params.contentType {
 		case "text/plain":
+			// Exempt from mention validation: literal means literal — the text
+			// carries no rich_text elements, so a <@U…>, <#C…> or <!subteam^S…>
+			// here is resolved by Slack itself and passes through verbatim.
+			//
+			// Broadcasts are the one deliberate exception. MsgOptionDisableMarkdown
+			// does NOT neutralise them: a text/plain message containing "<!here>"
+			// was posted to a self-DM and came back rendered as a live amber @here
+			// pill that fired a real mention notification — while the blocks path's
+			// "@here" stayed inert text. Functional spec AC 2.3 is unconditional
+			// ("in any form"), so the literal is rewritten to the same inert "@here"
+			// the markdown path produces.
 			options = append(options, slack.MsgOptionDisableMarkdown())
-			options = append(options, slack.MsgOptionText(params.text, false))
+			options = append(options, slack.MsgOptionText(neutralizeBroadcasts(params.text), false))
 		case "text/markdown":
 			// Render markdown to a rich_text block, the same converter the drafts
 			// path uses and the format Slack's native composer produces. Section
 			// blocks (the previous approach) render bold/links/lists less
 			// faithfully. params.text is also attached as the notification/fallback
 			// text, exactly like the raw-blocks branch above.
-			block, err := markdownToRichTextBlock(params.text)
+			block, err := ch.convertMarkdownToRichText(params.text)
 			if err != nil {
 				ch.logger.Warn("Markdown parsing error", zap.Error(err))
+				// The conversion failed, so there are no blocks: the fallback
+				// text IS the whole message body. That makes neutralisation
+				// MORE necessary here than on the success path below, not less
+				// — a "<!here>" reaching Slack's text field with nothing
+				// rendering it inert is a live workspace-wide broadcast, which
+				// functional spec §2.3 forbids the assistant from raising. The
+				// reader sees the same "@here" the blocks path produces, and
+				// non-broadcast references still pass through verbatim.
 				options = append(options, slack.MsgOptionDisableMarkdown())
-				options = append(options, slack.MsgOptionText(params.text, false))
+				options = append(options, slack.MsgOptionText(neutralizeBroadcasts(params.text), false))
 			} else {
+				// A mention that cannot be verified stops the post, before
+				// PostMessageContext runs (functional spec AC 2.4). This is a
+				// hard return, NOT the plain-text fallback above: that fallback
+				// exists for *conversion* errors, and reusing it here would post
+				// the message with a raw "<@U…>" code in it — precisely the
+				// defect this gate exists to prevent.
+				if vErr := validateMentions(ctx, block, ch.mentionDir()); vErr != nil {
+					ch.logger.Error("Message mention validation failed", zap.Error(vErr))
+					return nil, fmt.Errorf("conversations_add_message: %w", vErr)
+				}
 				options = append(options, slack.MsgOptionBlocks(block))
-				options = append(options, slack.MsgOptionText(params.text, false))
+				// The fallback carries the source markdown, minus its broadcast
+				// literals: "<!here>" is Slack's own encoding of a live @here, and
+				// the fallback text is what Slack builds the notification from. The
+				// blocks already render broadcasts as inert "@here" text, so this
+				// makes both halves of the message say the same inert thing. Other
+				// reference classes stay verbatim on purpose — Slack resolving a
+				// <@U…> for the notification is wanted.
+				options = append(options, slack.MsgOptionText(neutralizeBroadcasts(params.text), false))
 			}
 		default:
 			return nil, errors.New("content_type must be either 'text/plain' or 'text/markdown'")
@@ -299,7 +350,7 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		zap.String("thread_ts", params.threadTs),
 		zap.String("content_type", params.contentType),
 	)
-	respChannel, respTimestamp, err := ch.apiProvider.Slack().PostMessageContext(ctx, params.channel, options...)
+	respChannel, respTimestamp, err := ch.postMessageClient().PostMessageContext(ctx, params.channel, options...)
 	if err != nil {
 		ch.logger.Error("Slack PostMessageContext failed", zap.Error(err))
 		return nil, err
@@ -318,6 +369,24 @@ func (ch *ConversationsHandler) ConversationsAddMessageHandler(ctx context.Conte
 		return mcp.NewToolResultText(fmt.Sprintf("Successfully posted message to channel %s in thread %s (ts=%s)", respChannel, params.threadTs, respTimestamp)), nil
 	}
 	return mcp.NewToolResultText(fmt.Sprintf("Successfully posted message to channel %s (ts=%s)", respChannel, respTimestamp)), nil
+}
+
+// postMessageAPI is the narrow slice of the Slack client the add-message
+// handler sends through. Like draftsAPI it exists as a seam so handler tests
+// can record what was posted — and, on the mention-refusal path, prove that
+// nothing was posted at all; production wiring falls through
+// postMessageClient() to the real provider client, which already implements it.
+type postMessageAPI interface {
+	PostMessageContext(ctx context.Context, channelID string, options ...slack.MsgOption) (string, string, error)
+}
+
+// postMessageClient returns the client the add-message handler posts through:
+// the injected test seam when set, otherwise the real provider client.
+func (ch *ConversationsHandler) postMessageClient() postMessageAPI {
+	if ch.postMessages != nil {
+		return ch.postMessages
+	}
+	return ch.apiProvider.Slack()
 }
 
 // draftsAPI is the narrow slice of the Slack client the draft-message handler
@@ -355,6 +424,26 @@ func (ch *ConversationsHandler) checkDraftContentLoss(input string, rtb *slack.R
 		return ch.draftContentLossFn(input, rtb)
 	}
 	return draftContentLoss(input, rtb)
+}
+
+// mentionDir returns the mention directory the handler verifies and names
+// mentions against: the injected test seam when set, otherwise a directory
+// built from the provider.
+//
+// Call it ONCE per tool call and pass the result to every consumer. The
+// directory memoises lookups — including the single usergroups.list fetch —
+// for its own lifetime, so a draft that mentions a user group costs one
+// usergroups.list call when validation and readback share one directory, and
+// two when they each build their own.
+//
+// A per-call directory (rather than a long-lived one) is equally deliberate:
+// names resolve live, so a directory outliving the call would serve a renamed
+// user's old handle indefinitely.
+func (ch *ConversationsHandler) mentionDir() mentionResolver {
+	if ch.mentions != nil {
+		return ch.mentions
+	}
+	return newMentionDirectory(ch.apiProvider, ch.logger)
 }
 
 // tokenIsOAuth reports the provider's token-type check through the injected
@@ -505,6 +594,11 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		return nil, errors.New("conversations_draft_message: drafts require a browser-session token (xoxc/xoxd); the configured token type cannot access Slack's drafts API")
 	}
 
+	// One directory for the whole call, shared by mention validation below and
+	// by every readback further down. Building a second one would issue a
+	// second usergroups.list for the same draft.
+	mentions := ch.mentionDir()
+
 	// drafts.create (the Slack message composer) only accepts rich_text blocks;
 	// it silently drops section/header blocks. So, unlike conversations_add_message,
 	// the draft body must be a single rich_text block — or, for
@@ -513,6 +607,8 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 	var blocksJSON json.RawMessage
 	switch params.contentType {
 	case "text/plain":
+		// Exempt from mention validation: literal means literal. A "<@U123>" the
+		// caller typed here is text, becomes no element, and notifies nobody.
 		richText = plainRichTextBlock(params.text)
 	case "text/markdown":
 		converted, convErr := ch.convertMarkdownToRichText(params.text)
@@ -526,6 +622,22 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 				zap.Strings("missing_words", missing))
 			return nil, fmt.Errorf("conversations_draft_message: refusing to create draft because markdown conversion dropped content (missing words: %s). Please report this input", strings.Join(missing, ", "))
 		} else {
+			// ORDERING CONTRACT (functional spec AC 2.4) — do not reorder.
+			//
+			// Mention validation runs here: after the loss check, and strictly
+			// ABOVE the DraftsList call below. When it refuses, nothing has run
+			// — not drafts.list, not drafts.create, not drafts.update — so a
+			// draft already sitting at this destination is not read, not
+			// listed, and categorically not modified. A refusal must never be
+			// able to damage existing content.
+			//
+			// The loss check comes first because it is local and free while
+			// validation may hit the network: a conversion bug should not cost
+			// API calls.
+			if vErr := validateMentions(ctx, converted, mentions); vErr != nil {
+				ch.logger.Error("Draft mention validation failed", zap.Error(vErr))
+				return nil, fmt.Errorf("conversations_draft_message: %w", vErr)
+			}
 			richText = converted
 		}
 	case "application/json":
@@ -533,6 +645,12 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		// already-valid Slack blocks, not markdown, so the markdown converter
 		// and the loss check are bypassed entirely (the loss check would
 		// false-positive on content that was never markdown).
+		//
+		// Mention validation is bypassed for the same reason, and it matters:
+		// these blocks came from Slack itself, so a human-authored draft that
+		// mentions a since-deactivated colleague would become permanently
+		// unrestorable if it were validated — breaking the displaced.blocks_json
+		// restore promise this content type exists to keep.
 		verbatim, vErr := parseVerbatimDraftBlocks(json.RawMessage(params.text))
 		if vErr != nil {
 			ch.logger.Error("Invalid application/json draft blocks", zap.Error(vErr))
@@ -638,7 +756,7 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		// This is a successful tool result, not an error: the caller must
 		// receive structured content (blocks_json to compare, text to show
 		// the user) and act on it.
-		content, cErr := draftContentPayload(existing)
+		content, cErr := ch.draftContentPayload(ctx, mentions, existing)
 		if cErr != nil {
 			ch.logger.Error("Failed to decode existing draft content", zap.Error(cErr))
 			return nil, fmt.Errorf("conversations_draft_message: a draft (%s) already exists at this destination and nothing was written, but its content could not be decoded for review: %w", existing.ID, cErr)
@@ -659,7 +777,7 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		// Authorized overwrite. Capture the displaced content before touching
 		// anything: if it cannot be decoded it cannot be shown or restored,
 		// so the update must not happen.
-		displaced, cErr := draftContentPayload(existing)
+		displaced, cErr := ch.draftContentPayload(ctx, mentions, existing)
 		if cErr != nil {
 			ch.logger.Error("Failed to decode draft content before overwrite", zap.Error(cErr))
 			return nil, fmt.Errorf("conversations_draft_message: refusing to overwrite draft %s because its current content could not be decoded for the displaced report: %w", existing.ID, cErr)
@@ -672,7 +790,7 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		)
 		if err := drafts.DraftsUpdate(ctx, existing.ID, existing.ClientMsgID, existing.LastUpdatedTS, params.channel, params.threadTs, blocksJSON); err != nil {
 			if errors.Is(err, edge.ErrDraftConflict) {
-				return ch.draftConflictResult(ctx, drafts, existing.ID, result)
+				return ch.draftConflictResult(ctx, drafts, mentions, existing.ID, result)
 			}
 			ch.logger.Error("Slack DraftsUpdate failed", zap.Error(err))
 			return nil, err
@@ -681,7 +799,7 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 		if err != nil {
 			return nil, err
 		}
-		content, cErr := draftContentPayload(confirmed)
+		content, cErr := ch.draftContentPayload(ctx, mentions, confirmed)
 		if cErr != nil {
 			ch.logger.Error("Failed to decode confirmed draft content", zap.Error(cErr))
 			return nil, fmt.Errorf("conversations_draft_message: update of draft %s succeeded, but the confirming re-list returned content that could not be decoded: %w; verify the draft state in Slack", existing.ID, cErr)
@@ -710,7 +828,7 @@ func (ch *ConversationsHandler) ConversationsDraftMessageHandler(ctx context.Con
 	if err != nil {
 		return nil, err
 	}
-	content, cErr := draftContentPayload(confirmed)
+	content, cErr := ch.draftContentPayload(ctx, mentions, confirmed)
 	if cErr != nil {
 		ch.logger.Error("Failed to decode confirmed draft content", zap.Error(cErr))
 		return nil, fmt.Errorf("conversations_draft_message: creation of draft %s succeeded, but the confirming re-list returned content that could not be decoded: %w; verify the draft state in Slack", createdID, cErr)
@@ -747,7 +865,13 @@ func draftNoteForWrite(sentBlocks, storedNormalized json.RawMessage, confirmedNo
 // null (a listed draft with no content) is reported as empty content rather
 // than an error — otherwise the refusal path would dead-end in a bare error
 // the agent can neither review nor consent to.
-func draftContentPayload(d edge.Draft) (draftContent, error) {
+//
+// It takes a ctx and the call's mention directory because rendering names
+// mentions against the workspace; the directory is the caller's, so the
+// usergroups.list fetch is shared with mention validation rather than repeated.
+// Only Text is affected: BlocksJSON stays the normalised as-stored bytes, which
+// is what provenance comparison and restore use.
+func (ch *ConversationsHandler) draftContentPayload(ctx context.Context, namer mentionNamer, d edge.Draft) (draftContent, error) {
 	if trimmed := bytes.TrimSpace(d.Blocks); len(trimmed) == 0 || string(trimmed) == "null" {
 		return draftContent{
 			Text:              "",
@@ -760,7 +884,7 @@ func draftContentPayload(d edge.Draft) (draftContent, error) {
 		return draftContent{}, fmt.Errorf("normalize blocks of draft %s: %w", d.ID, err)
 	}
 	return draftContent{
-		Text:              renderDraftBlocksText(normalized),
+		Text:              renderDraftBlocksText(ctx, normalized, namer),
 		BlocksJSON:        normalized,
 		LastUpdatedClient: d.LastUpdatedClient,
 	}, nil
@@ -802,7 +926,7 @@ func (ch *ConversationsHandler) confirmDraftWrite(ctx context.Context, drafts dr
 // retried — the content the caller compared against is now stale. Instead the
 // draft is re-listed and its current content returned as a successful
 // "conflict" result, restarting the consent protocol from fresh state.
-func (ch *ConversationsHandler) draftConflictResult(ctx context.Context, drafts draftsAPI, draftID string, result draftActionResult) (*mcp.CallToolResult, error) {
+func (ch *ConversationsHandler) draftConflictResult(ctx context.Context, drafts draftsAPI, namer mentionNamer, draftID string, result draftActionResult) (*mcp.CallToolResult, error) {
 	ch.logger.Warn("Draft was edited concurrently; Slack rejected the update", zap.String("draft_id", draftID))
 	listed, err := drafts.DraftsList(ctx, draftsListLimit)
 	if err != nil {
@@ -814,7 +938,7 @@ func (ch *ConversationsHandler) draftConflictResult(ctx context.Context, drafts 
 		ch.logger.Error("Re-list after draft conflict could not find the draft", zap.String("draft_id", draftID))
 		return nil, fmt.Errorf("conversations_draft_message: draft %s was edited by another client and the update was rejected, but the re-list could not find it; verify the draft state in Slack", draftID)
 	}
-	content, cErr := draftContentPayload(current)
+	content, cErr := ch.draftContentPayload(ctx, namer, current)
 	if cErr != nil {
 		ch.logger.Error("Failed to decode conflicting draft content", zap.Error(cErr))
 		return nil, fmt.Errorf("conversations_draft_message: draft %s was edited by another client and the update was rejected, but its current content could not be decoded: %w", draftID, cErr)

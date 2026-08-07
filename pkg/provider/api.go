@@ -42,6 +42,25 @@ var ErrChannelMembersNotReady = errors.New(channelMembersNotReadyMsg)
 var ErrRefreshRateLimited = errors.New("refresh skipped due to rate limiting")
 var ErrCountsUnavailable = errors.New("client counts unavailable, edge client is missing or the call failed")
 
+// ErrUserNotFound reports that Slack has no user with the requested ID —
+// users.info answered users_not_found/user_not_found, or returned an empty
+// result. It is deliberately distinct from every other PatchUser failure:
+// callers that must tell "this ID names nobody" (self-correctable) from "the
+// workspace could not be consulted" (transient) — the draft/message mention
+// gate — can only do that with a sentinel, since both arrive as a plain error.
+var ErrUserNotFound = errors.New("user not found")
+
+// slackErrorCode returns Slack's machine-readable error code
+// ("users_not_found", "missing_scope", …) for an API error, or "" when the
+// error is not a Slack API response.
+func slackErrorCode(err error) string {
+	var sre slack.SlackErrorResponse
+	if errors.As(err, &sre) {
+		return sre.Err
+	}
+	return ""
+}
+
 // atomicWriteFile writes data to a file atomically using a temp file and rename.
 // Uses os.CreateTemp for unpredictable temp file names (prevents symlink attacks)
 // and cleans up the temp file on rename failure.
@@ -933,15 +952,31 @@ func (ap *ApiProvider) ForceRefreshUsers(ctx context.Context) error {
 // the in-memory users snapshot. This is much cheaper than a full cache rebuild
 // for a single cache miss (O(1) API call vs O(all users)).
 // Disk persistence is skipped — the next full refresh will persist the entry.
+//
+// A user Slack does not know returns ErrUserNotFound; every other failure
+// returns the underlying error unwrapped. Callers on the write path depend on
+// that split, so an absent user is never reported as a transport problem or
+// vice versa.
+//
+// The call is deliberately NOT throttled here. PatchUser is on the message
+// render path (conversations_history / conversations_replies / search name
+// users through it), where a per-call limiter wait would add seconds of latency
+// to a page with several uncached users. Callers that need a burst throttled —
+// the draft/message mention gate — wrap it in limiter.CallWithRetry themselves.
 func (ap *ApiProvider) PatchUser(ctx context.Context, userID string) (*slack.User, error) {
 	usersInfo, err := ap.client.GetUsersInfo(userID)
 	if err != nil {
+		switch slackErrorCode(err) {
+		case "users_not_found", "user_not_found":
+			ap.logger.Debug("User not found via API", zap.String("user_id", userID))
+			return nil, fmt.Errorf("%w: %s", ErrUserNotFound, userID)
+		}
 		ap.logger.Warn("Failed to fetch user for cache patch", zap.String("user_id", userID), zap.Error(err))
 		return nil, err
 	}
 	if usersInfo == nil || len(*usersInfo) == 0 {
 		ap.logger.Debug("User not found via API", zap.String("user_id", userID))
-		return nil, errors.New("user not found")
+		return nil, fmt.Errorf("%w: %s", ErrUserNotFound, userID)
 	}
 
 	user := (*usersInfo)[0]
