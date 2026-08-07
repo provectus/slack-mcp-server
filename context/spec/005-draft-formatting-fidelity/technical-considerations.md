@@ -1,7 +1,7 @@
 # Technical Specification: Draft & Message Formatting Fidelity
 
 - **Functional Specification:** [`functional-spec.md`](./functional-spec.md)
-- **Status:** Draft
+- **Status:** Completed
 - **Author(s):** `go-mcp-backend` specialist, orchestrated via `/implement-feature`
 
 ---

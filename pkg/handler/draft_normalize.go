@@ -2,6 +2,7 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -100,11 +101,20 @@ func stripBlockIDs(v any) {
 // text with structural hints: blank lines between sections (paragraphs), "-"/"N." list
 // markers, "> " quote prefixes and ``` fences around preformatted code.
 //
-// DISPLAY ONLY. This rendering is lossy by design (styling, mention identity
-// and unknown elements are flattened or dropped) and must never be used as a
-// restore or comparison source — blocks_json is the authoritative content. On
-// decode failure it degrades to a placeholder directing the reader there.
-func renderDraftBlocksText(raw json.RawMessage) string {
+// DISPLAY ONLY. This rendering is lossy by design (styling and unknown
+// elements are flattened or dropped) and must never be used as a restore or
+// comparison source — blocks_json is the authoritative content. On decode
+// failure it degrades to a placeholder directing the reader there.
+//
+// Mentions make that doubly true. Names are resolved live against the
+// workspace, so this output is NOT STABLE ACROSS CALLS: rename a user and two
+// readbacks of the very same unmodified draft differ, and a lookup that fails
+// once falls back to the canonical literal while the next succeeds with a name.
+// Comparing two renderings therefore proves nothing about whether the draft
+// changed, and re-submitting one would replace a live mention with the text of
+// a name. The drafts provenance comparison uses blocks_json and must keep doing
+// so.
+func renderDraftBlocksText(ctx context.Context, raw json.RawMessage, namer mentionNamer) string {
 	var blocks slack.Blocks
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return draftBlocksUnrenderable
@@ -117,7 +127,7 @@ func renderDraftBlocksText(raw json.RawMessage) string {
 			continue
 		}
 		for _, el := range rtb.Elements {
-			if s := renderRichTextElement(el); s != "" {
+			if s := renderRichTextElement(ctx, el, namer); s != "" {
 				parts = append(parts, s)
 			}
 		}
@@ -133,10 +143,10 @@ func renderDraftBlocksText(raw json.RawMessage) string {
 // renderRichTextElement renders one top-level rich_text element (section,
 // list, quote or preformatted) into display text. Unknown element types
 // render as empty — best effort, never an error.
-func renderRichTextElement(el slack.RichTextElement) string {
+func renderRichTextElement(ctx context.Context, el slack.RichTextElement, namer mentionNamer) string {
 	switch e := el.(type) {
 	case *slack.RichTextSection:
-		return renderRichTextSectionElements(e.Elements)
+		return renderRichTextSectionElements(ctx, e.Elements, namer)
 
 	case *slack.RichTextList:
 		indent := strings.Repeat("  ", e.Indent)
@@ -148,7 +158,7 @@ func renderRichTextElement(el slack.RichTextElement) string {
 			}
 			body := ""
 			if s, ok := item.(*slack.RichTextSection); ok {
-				body = renderRichTextSectionElements(s.Elements)
+				body = renderRichTextSectionElements(ctx, s.Elements, namer)
 			}
 			lines = append(lines, indent+marker+" "+body)
 		}
@@ -156,13 +166,13 @@ func renderRichTextElement(el slack.RichTextElement) string {
 
 	case *slack.RichTextQuote:
 		var quoted []string
-		for _, line := range strings.Split(renderRichTextSectionElements(e.Elements), "\n") {
+		for _, line := range strings.Split(renderRichTextSectionElements(ctx, e.Elements, namer), "\n") {
 			quoted = append(quoted, "> "+line)
 		}
 		return strings.Join(quoted, "\n")
 
 	case *slack.RichTextPreformatted:
-		return "```\n" + strings.TrimRight(renderRichTextSectionElements(e.Elements), "\n") + "\n```"
+		return "```\n" + strings.TrimRight(renderRichTextSectionElements(ctx, e.Elements, namer), "\n") + "\n```"
 
 	default:
 		return ""
@@ -172,7 +182,7 @@ func renderRichTextElement(el slack.RichTextElement) string {
 // renderRichTextSectionElements flattens section elements into display text,
 // covering the element types Slack drafts carry in practice. Unknown element
 // types are skipped — best effort, never an error.
-func renderRichTextSectionElements(elems []slack.RichTextSectionElement) string {
+func renderRichTextSectionElements(ctx context.Context, elems []slack.RichTextSectionElement, namer mentionNamer) string {
 	var sb strings.Builder
 	for _, e := range elems {
 		switch el := e.(type) {
@@ -185,14 +195,34 @@ func renderRichTextSectionElements(elems []slack.RichTextSectionElement) string 
 				sb.WriteString(el.URL)
 			}
 		case *slack.RichTextSectionUserElement:
-			sb.WriteString("<@" + el.UserID + ">")
+			sb.WriteString(renderMention(ctx, namer, mentionRef{Kind: mentionUser, ID: el.UserID}))
 		case *slack.RichTextSectionChannelElement:
-			sb.WriteString("<#" + el.ChannelID + ">")
+			sb.WriteString(renderMention(ctx, namer, mentionRef{Kind: mentionChannel, ID: el.ChannelID}))
+		case *slack.RichTextSectionUserGroupElement:
+			sb.WriteString(renderMention(ctx, namer, mentionRef{Kind: mentionUserGroup, ID: el.UsergroupID}))
 		case *slack.RichTextSectionEmojiElement:
 			sb.WriteString(":" + el.Name + ":")
 		case *slack.RichTextSectionBroadcastElement:
-			sb.WriteString("@" + el.Range)
+			// Never constructed by this server's converter (a broadcast becomes
+			// inert text), but a human-authored draft can carry one. It has no
+			// directory entry, so it is rendered without consulting the namer:
+			// canonicalLiteral already reads "@here" / "@channel" / "@everyone".
+			sb.WriteString(mentionRef{Kind: mentionBroadcast, Range: el.Range}.canonicalLiteral())
 		}
 	}
 	return sb.String()
+}
+
+// renderMention renders one mention by name, falling back to the canonical
+// literal when the name cannot be determined — never to nothing. A reference
+// the reader cannot see at all is worse than one shown as a raw code: the
+// readback exists so the assistant can tell the user who it tagged, and a
+// silently omitted mention would make a wrong tag invisible.
+func renderMention(ctx context.Context, namer mentionNamer, ref mentionRef) string {
+	if namer != nil {
+		if name := namer.Name(ctx, ref); name != "" {
+			return name
+		}
+	}
+	return ref.canonicalLiteral()
 }
