@@ -307,6 +307,26 @@ func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
 	return true
 }
 
+// IsFalsey reports whether v is an explicit "disabled" value: "false", "0",
+// "no", or "off", case-insensitively and ignoring surrounding whitespace.
+func IsFalsey(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "false", "0", "no", "off":
+		return true
+	}
+	return false
+}
+
+// IsTruthy reports whether v is an explicit "enabled" value: "true", "1", or
+// "yes", case-insensitively and ignoring surrounding whitespace.
+func IsTruthy(v string) bool {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "true", "1", "yes":
+		return true
+	}
+	return false
+}
+
 func Workspace(rawURL string) (string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {

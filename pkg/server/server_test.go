@@ -485,3 +485,115 @@ func TestShouldAddTool_Matrix(t *testing.T) {
 		})
 	}
 }
+
+// TestUnitShouldAddToolFalseyEnv is the core regression: before the fix, the
+// env branch was `os.Getenv(envVarName) != ""`, so any non-empty value —
+// including explicit "disabled" spellings like "false" or "0" — registered
+// the tool. Falsey values must now be rejected for all five tool env vars,
+// and the two boolean-only vars (SLACK_MCP_MARK_TOOL,
+// SLACK_MCP_ATTACHMENT_TOOL) additionally require an explicit truthy value,
+// so junk like "banana" never registers a tool whose handler gate would
+// refuse every call. Channel-scoped vars keep treating any other non-empty
+// value as a channel allowlist.
+//
+// @layer: unit
+// @spec: falsey-env-registers-tool
+// @regression
+func TestUnitShouldAddToolFalseyEnv(t *testing.T) {
+	tests := []struct {
+		name     string
+		tool     string
+		envVar   string
+		boolean  bool
+		envSet   bool
+		envValue string
+		expected bool
+	}{
+		// Boolean-only: SLACK_MCP_MARK_TOOL.
+		{name: "mark false", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "false", expected: false},
+		{name: "mark 0", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "0", expected: false},
+		{name: "mark no", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "no", expected: false},
+		{name: "mark off", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "off", expected: false},
+		{name: "mark uppercase FALSE", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "FALSE", expected: false},
+		{name: "mark padded false", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: " false ", expected: false},
+		{name: "mark whitespace only", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "   ", expected: false},
+		{name: "mark junk value does not register", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "banana", expected: false},
+		{name: "mark true", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "true", expected: true},
+		{name: "mark 1", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "1", expected: true},
+		{name: "mark yes", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: true, envValue: "yes", expected: true},
+		{name: "mark unset", tool: ToolConversationsMark, envVar: "SLACK_MCP_MARK_TOOL", boolean: true, envSet: false, expected: false},
+		// Boolean-only: SLACK_MCP_ATTACHMENT_TOOL.
+		{name: "attachment false", tool: ToolAttachmentGetData, envVar: "SLACK_MCP_ATTACHMENT_TOOL", boolean: true, envSet: true, envValue: "false", expected: false},
+		{name: "attachment junk value does not register", tool: ToolAttachmentGetData, envVar: "SLACK_MCP_ATTACHMENT_TOOL", boolean: true, envSet: true, envValue: "banana", expected: false},
+		{name: "attachment true", tool: ToolAttachmentGetData, envVar: "SLACK_MCP_ATTACHMENT_TOOL", boolean: true, envSet: true, envValue: "true", expected: true},
+		// Channel-scoped: SLACK_MCP_ADD_MESSAGE_TOOL.
+		{name: "add-message false", tool: ToolConversationsAddMessage, envVar: "SLACK_MCP_ADD_MESSAGE_TOOL", envSet: true, envValue: "false", expected: false},
+		{name: "add-message channel allowlist keeps registering", tool: ToolConversationsAddMessage, envVar: "SLACK_MCP_ADD_MESSAGE_TOOL", envSet: true, envValue: "C123,C456", expected: true},
+		{name: "add-message negated channel allowlist keeps registering", tool: ToolConversationsAddMessage, envVar: "SLACK_MCP_ADD_MESSAGE_TOOL", envSet: true, envValue: "!C123", expected: true},
+		// Channel-scoped: SLACK_MCP_DRAFT_MESSAGE_TOOL.
+		{name: "draft off", tool: ToolConversationsDraftMessage, envVar: "SLACK_MCP_DRAFT_MESSAGE_TOOL", envSet: true, envValue: "off", expected: false},
+		{name: "draft channel allowlist keeps registering", tool: ToolConversationsDraftMessage, envVar: "SLACK_MCP_DRAFT_MESSAGE_TOOL", envSet: true, envValue: "C123", expected: true},
+		// Channel-scoped: SLACK_MCP_REACTION_TOOL.
+		{name: "reaction 0", tool: ToolReactionsAdd, envVar: "SLACK_MCP_REACTION_TOOL", envSet: true, envValue: "0", expected: false},
+		{name: "reaction channel allowlist keeps registering", tool: ToolReactionsAdd, envVar: "SLACK_MCP_REACTION_TOOL", envSet: true, envValue: "C123", expected: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.envSet {
+				t.Setenv(tt.envVar, tt.envValue)
+			} else {
+				// t.Setenv registers the restore; Unsetenv then makes the
+				// variable truly absent for the duration of the subtest.
+				t.Setenv(tt.envVar, "")
+				os.Unsetenv(tt.envVar)
+			}
+
+			decide := shouldAddTool
+			if tt.boolean {
+				decide = shouldAddBooleanTool
+			}
+			result := decide(tt.tool, []string{}, tt.envVar)
+			assert.Equal(t, tt.expected, result, "value %q", tt.envValue)
+		})
+	}
+}
+
+// TestUnitShouldAddToolEnabledToolsPrecedenceOverFalseyEnv guards against an
+// over-broad fix: the SLACK_MCP_ENABLED_TOOLS allowlist branch must still win
+// outright, regardless of what the tool-specific env var says — for both the
+// boolean-only and channel-scoped variants.
+//
+// @layer: unit
+// @spec: falsey-env-registers-tool
+// @regression
+func TestUnitShouldAddToolEnabledToolsPrecedenceOverFalseyEnv(t *testing.T) {
+	t.Run("tool in enabledTools wins even with falsey env var", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_MARK_TOOL", "false")
+
+		result := shouldAddBooleanTool(ToolConversationsMark, []string{ToolConversationsMark}, "SLACK_MCP_MARK_TOOL")
+		assert.True(t, result)
+	})
+
+	t.Run("tool in enabledTools wins even with junk env var", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_MARK_TOOL", "banana")
+
+		result := shouldAddBooleanTool(ToolConversationsMark, []string{ToolConversationsMark}, "SLACK_MCP_MARK_TOOL")
+		assert.True(t, result)
+	})
+
+	t.Run("tool in enabledTools wins even with unset env var", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_MARK_TOOL", "")
+		os.Unsetenv("SLACK_MCP_MARK_TOOL")
+
+		result := shouldAddBooleanTool(ToolConversationsMark, []string{ToolConversationsMark}, "SLACK_MCP_MARK_TOOL")
+		assert.True(t, result)
+	})
+
+	t.Run("channel-scoped tool in enabledTools wins even with falsey env var", func(t *testing.T) {
+		t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "false")
+
+		result := shouldAddTool(ToolConversationsAddMessage, []string{ToolConversationsAddMessage}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+		assert.True(t, result)
+	})
+}

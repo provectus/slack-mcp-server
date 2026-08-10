@@ -98,7 +98,25 @@ func ValidateEnabledTools(tools []string) error {
 	return nil
 }
 
+// shouldAddTool decides registration for tools whose env var may carry a
+// channel allowlist (e.g. SLACK_MCP_ADD_MESSAGE_TOOL): any non-empty value
+// that is not an explicit falsey spelling registers the tool.
 func shouldAddTool(name string, enabledTools []string, envVarName string) bool {
+	return shouldAddToolByEnv(name, enabledTools, envVarName, func(v string) bool {
+		return !text.IsFalsey(v)
+	})
+}
+
+// shouldAddBooleanTool decides registration for tools whose env var is
+// boolean-only, with no channel-list meaning (SLACK_MCP_MARK_TOOL,
+// SLACK_MCP_ATTACHMENT_TOOL): only an explicit truthy value registers the
+// tool, so a junk value never advertises a tool whose handler gate would
+// refuse every call.
+func shouldAddBooleanTool(name string, enabledTools []string, envVarName string) bool {
+	return shouldAddToolByEnv(name, enabledTools, envVarName, text.IsTruthy)
+}
+
+func shouldAddToolByEnv(name string, enabledTools []string, envVarName string, envEnables func(string) bool) bool {
 	if envVarName == "" {
 		if len(enabledTools) == 0 {
 			return true
@@ -111,7 +129,8 @@ func shouldAddTool(name string, enabledTools []string, envVarName string) bool {
 	}
 
 	if len(enabledTools) == 0 {
-		return os.Getenv(envVarName) != ""
+		v := strings.TrimSpace(os.Getenv(envVarName))
+		return v != "" && envEnables(v)
 	}
 
 	return false
@@ -205,7 +224,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 		), conversationsHandler.ConversationsAddMessageHandler)
 	}
 
-	if shouldAddTool(ToolConversationsMark, enabledTools, "SLACK_MCP_MARK_TOOL") {
+	if shouldAddBooleanTool(ToolConversationsMark, enabledTools, "SLACK_MCP_MARK_TOOL") {
 		s.AddTool(mcp.NewTool(ToolConversationsMark,
 			mcp.WithDescription("Mark one or more conversations (channels, DMs, or groups) as read up to a specific message timestamp. Accepts a list of channel/timestamp pairs to mark in bulk."),
 			mcp.WithTitleAnnotation("Mark Conversations as Read"),
@@ -302,7 +321,7 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 		), conversationsHandler.ReactionsRemoveHandler)
 	}
 
-	if shouldAddTool(ToolAttachmentGetData, enabledTools, "SLACK_MCP_ATTACHMENT_TOOL") {
+	if shouldAddBooleanTool(ToolAttachmentGetData, enabledTools, "SLACK_MCP_ATTACHMENT_TOOL") {
 		s.AddTool(mcp.NewTool(ToolAttachmentGetData,
 			mcp.WithDescription("Download an attachment's content by file ID. Returns file metadata and content (text files as-is, binary files as base64). Maximum file size is 5MB."),
 			mcp.WithTitleAnnotation("Get Attachment Data"),

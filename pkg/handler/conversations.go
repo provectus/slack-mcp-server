@@ -963,6 +963,25 @@ func marshalDraftActionResult(r draftActionResult) (*mcp.CallToolResult, error) 
 func (ch *ConversationsHandler) ConversationsMarkHandler(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	ch.logger.Debug("ConversationsMarkHandler called", zap.Any("params", request.Params))
 
+	toolConfig := os.Getenv("SLACK_MCP_MARK_TOOL")
+	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
+
+	// A tool listed in SLACK_MCP_ENABLED_TOOLS is always callable, whatever
+	// its own env var says — registration and this gate must agree.
+	if !strings.Contains(enabledTools, "conversations_mark") {
+		if toolConfig == "" {
+			ch.logger.Error("Mark tool disabled by default")
+			return nil, errors.New(
+				"by default, the conversations_mark tool is disabled. " +
+					"To enable it, set the SLACK_MCP_MARK_TOOL environment variable to true or 1",
+			)
+		}
+		if !text.IsTruthy(toolConfig) {
+			ch.logger.Error("Mark tool disabled", zap.String("config", toolConfig))
+			return nil, errors.New("SLACK_MCP_MARK_TOOL must be set to 'true', '1', or 'yes' to enable")
+		}
+	}
+
 	if ready, err := ch.apiProvider.IsReady(); !ready {
 		ch.logger.Error("API provider not ready", zap.Error(err))
 		return nil, err
@@ -2655,19 +2674,20 @@ func (ch *ConversationsHandler) parseParamsToolFilesGet(request mcp.CallToolRequ
 	toolConfig := os.Getenv("SLACK_MCP_ATTACHMENT_TOOL")
 	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
 
-	if toolConfig == "" {
-		if !strings.Contains(enabledTools, "attachment_get_data") {
+	// A tool listed in SLACK_MCP_ENABLED_TOOLS is always callable, whatever
+	// its own env var says — registration and this gate must agree.
+	if !strings.Contains(enabledTools, "attachment_get_data") {
+		if toolConfig == "" {
 			ch.logger.Error("Attachment tool disabled by default")
 			return nil, errors.New(
 				"by default, the attachment_get_data tool is disabled. " +
 					"To enable it, set the SLACK_MCP_ATTACHMENT_TOOL environment variable to true or 1",
 			)
 		}
-		toolConfig = "true"
-	}
-	if toolConfig != "true" && toolConfig != "1" && toolConfig != "yes" {
-		ch.logger.Error("Attachment tool disabled", zap.String("config", toolConfig))
-		return nil, errors.New("SLACK_MCP_ATTACHMENT_TOOL must be set to 'true', '1', or 'yes' to enable")
+		if !text.IsTruthy(toolConfig) {
+			ch.logger.Error("Attachment tool disabled", zap.String("config", toolConfig))
+			return nil, errors.New("SLACK_MCP_ATTACHMENT_TOOL must be set to 'true', '1', or 'yes' to enable")
+		}
 	}
 
 	fileID := request.GetString("file_id", "")
