@@ -38,8 +38,24 @@ func plainRichTextBlock(text string) *slack.RichTextBlock {
 // rich_text_section elements, lists as rich_text_list, fenced code as
 // rich_text_preformatted and blockquotes as rich_text_quote, all inside one
 // rich_text block, preserving inline bold, italic, inline-code and link styling.
+//
+// The raw markdown is first run through preprocessDraftSource, which rewrites
+// unicode bullet markers so goldmark's own list machinery produces a genuine
+// rich_text_list, and lifts every Slack reference out into an index placeholder
+// so goldmark cannot fragment, linkify or swallow it. Every emitted section's
+// element list then goes through splitSectionElements, which turns those
+// placeholders into user/channel/usergroup elements. The signature is
+// deliberately unchanged and the function stays pure: no ctx, no provider, no
+// network, preserving the markdownToRichTextBlockFn test seam and the
+// conversations_add_message call site. Mentions are verified against the
+// workspace by the handlers, not here.
 func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
-	source := []byte(markdown)
+	src, err := preprocessDraftSource(markdown)
+	if err != nil {
+		return nil, err
+	}
+
+	source := []byte(src.Text)
 	doc := draftMD.Parser().Parse(gmtext.NewReader(source))
 
 	var elements []slack.RichTextElement
@@ -71,14 +87,14 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 	for n := doc.FirstChild(); n != nil; n = n.NextSibling() {
 		switch n.Kind() {
 		case ast.KindParagraph:
-			addInline(parseDraftInline(n, source, false))
+			addInline(parseDraftInline(n, source, src, false))
 
 		case ast.KindHeading:
-			addInline(parseDraftInline(n, source, true))
+			addInline(parseDraftInline(n, source, src, true))
 
 		case ast.KindList:
 			flushInline()
-			elements = append(elements, buildRichTextLists(n.(*ast.List), source, 0)...)
+			elements = append(elements, buildRichTextLists(n.(*ast.List), source, src, 0)...)
 
 		case ast.KindFencedCodeBlock, ast.KindCodeBlock:
 			flushInline()
@@ -88,7 +104,7 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 					Elements: []slack.RichTextSectionElement{
 						&slack.RichTextSectionTextElement{
 							Type: slack.RTSEText,
-							Text: codeBlockText(n, source),
+							Text: codeBlockText(n, source, src),
 						},
 					},
 				},
@@ -98,13 +114,13 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 			flushInline()
 			elements = append(elements, &slack.RichTextQuote{
 				Type:     slack.RTEQuote,
-				Elements: parseDraftInline(n, source, false),
+				Elements: parseDraftInline(n, source, src, false),
 			})
 
 		default:
 			// Unknown top-level block: best-effort text extraction so content is
 			// never silently dropped. draftContentLoss is the hard backstop.
-			addInline(parseDraftInline(n, source, false))
+			addInline(parseDraftInline(n, source, src, false))
 		}
 	}
 	flushInline()
@@ -131,7 +147,7 @@ func markdownToRichTextBlock(markdown string) (*slack.RichTextBlock, error) {
 // elements with an increased Indent, emitted in document order so no list
 // content is dropped. Loose list items (multiple block children) are joined with
 // newlines within the item's section.
-func buildRichTextLists(list *ast.List, source []byte, indent int) []slack.RichTextElement {
+func buildRichTextLists(list *ast.List, source []byte, src draftSource, indent int) []slack.RichTextElement {
 	style := slack.RTEListBullet
 	if list.IsOrdered() {
 		style = slack.RTEListOrdered
@@ -163,7 +179,7 @@ func buildRichTextLists(list *ast.List, source []byte, indent int) []slack.RichT
 				nested = append(nested, c.(*ast.List))
 				continue
 			}
-			sub := parseDraftInline(c, source, false)
+			sub := parseDraftInline(c, source, src, false)
 			if len(sub) == 0 {
 				continue
 			}
@@ -180,7 +196,7 @@ func buildRichTextLists(list *ast.List, source []byte, indent int) []slack.RichT
 		if len(nested) > 0 {
 			flush()
 			for _, nl := range nested {
-				out = append(out, buildRichTextLists(nl, source, indent+1)...)
+				out = append(out, buildRichTextLists(nl, source, src, indent+1)...)
 			}
 		}
 	}
@@ -188,22 +204,26 @@ func buildRichTextLists(list *ast.List, source []byte, indent int) []slack.RichT
 	return out
 }
 
-// codeBlockText extracts the raw text of a (fenced) code block.
-func codeBlockText(n ast.Node, source []byte) string {
+// codeBlockText extracts the raw text of a (fenced) code block, restoring any
+// reference placeholder to the literal the user wrote. The line scanner skips
+// fenced and indented code, so a placeholder can only appear here when the block
+// was produced some other way; expanding is the safe default either way, since a
+// code block must never show a converted mention or a private-use rune.
+func codeBlockText(n ast.Node, source []byte, src draftSource) string {
 	var text string
 	lines := n.Lines()
 	for i := 0; i < lines.Len(); i++ {
 		line := lines.At(i)
 		text += string(line.Value(source))
 	}
-	return text
+	return src.expandPlaceholders(text)
 }
 
 // parseDraftInline converts the inline children of a container node (paragraph,
 // heading, list item, blockquote) into rich_text_section elements, preserving
 // bold, italic, inline-code and link styling. When forceBold is true every text
 // run is bolded (used to approximate markdown headings, which rich_text lacks).
-func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTextSectionElement {
+func parseDraftInline(n ast.Node, source []byte, src draftSource, forceBold bool) []slack.RichTextSectionElement {
 	var elements []slack.RichTextSectionElement
 
 	var process func(node ast.Node, isBold, isItalic bool)
@@ -260,7 +280,7 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 			// drop it and trip draftContentLoss into refusing the whole draft.
 			elements = append(elements, &slack.RichTextSectionLinkElement{
 				Type: slack.RTSELink,
-				Text: inlineNodeText(link, source),
+				Text: inlineNodeText(link, source, src),
 				URL:  string(link.Destination),
 			})
 
@@ -276,7 +296,7 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 		case ast.KindCodeSpan:
 			elements = append(elements, &slack.RichTextSectionTextElement{
 				Type:  slack.RTSEText,
-				Text:  inlineNodeText(node, source),
+				Text:  inlineNodeText(node, source, src),
 				Style: &slack.RichTextSectionTextStyle{Code: true},
 			})
 
@@ -288,7 +308,11 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 	}
 
 	process(n, false, false)
-	return elements
+
+	// Single choke point: every section element list the converter emits —
+	// paragraphs, headings, list items and quotes — flows through here, so
+	// expanding placeholders once at the end covers all of them.
+	return splitSectionElements(src, elements)
 }
 
 // inlineNodeText returns the concatenated visible text of an inline node,
@@ -296,7 +320,7 @@ func parseDraftInline(n ast.Node, source []byte, forceBold bool) []slack.RichTex
 // single flat label (rich_text links, code spans), where styled child text must
 // still be captured. Mirrors how collectMarkdownText gathers label text, so the
 // draftContentLoss backstop stays balanced.
-func inlineNodeText(n ast.Node, source []byte) string {
+func inlineNodeText(n ast.Node, source []byte, src draftSource) string {
 	var sb strings.Builder
 	_ = ast.Walk(n, func(node ast.Node, entering bool) (ast.WalkStatus, error) {
 		if !entering {
@@ -310,7 +334,10 @@ func inlineNodeText(n ast.Node, source []byte) string {
 		}
 		return ast.WalkContinue, nil
 	})
-	return sb.String()
+	// Link labels and code spans carry a flat string, with no room for a nested
+	// mention element, so a reference there is restored to the literal the user
+	// wrote rather than converted.
+	return src.expandPlaceholders(sb.String())
 }
 
 func draftTextStyle(isBold, isItalic bool) *slack.RichTextSectionTextStyle {
@@ -329,7 +356,10 @@ func draftTextStyle(isBold, isItalic bool) *slack.RichTextSectionTextStyle {
 // content, rather than producing a lossy draft. List markers and formatting
 // syntax are ignored (they are not text); link labels and URLs are both checked.
 func draftContentLoss(input string, rtb *slack.RichTextBlock) []string {
-	want := tokenizeWords(collectMarkdownText(input))
+	// Canonicalise references on the want side first: "<@U123|dana>" would
+	// otherwise contribute a "dana" token that the emitted user element — which
+	// carries only an ID — can never produce, manufacturing a false refusal.
+	want := tokenizeWords(collectMarkdownText(canonicalizeReferences(input)))
 	got := tokenizeWords(flattenRichTextContent(rtb))
 
 	var missing []string
@@ -389,6 +419,21 @@ func flattenRichTextContent(rtb *slack.RichTextBlock) string {
 				sb.WriteString(el.Text)
 				sb.WriteByte(' ')
 				sb.WriteString(el.URL)
+				sb.WriteByte(' ')
+			// The four mention element types carry no visible text of their own.
+			// Each writes its canonical literal, the same form canonicalizeReferences
+			// leaves on the want side, so the loss check stays balanced.
+			case *slack.RichTextSectionUserElement:
+				sb.WriteString(mentionRef{Kind: mentionUser, ID: el.UserID}.canonicalLiteral())
+				sb.WriteByte(' ')
+			case *slack.RichTextSectionChannelElement:
+				sb.WriteString(mentionRef{Kind: mentionChannel, ID: el.ChannelID}.canonicalLiteral())
+				sb.WriteByte(' ')
+			case *slack.RichTextSectionUserGroupElement:
+				sb.WriteString(mentionRef{Kind: mentionUserGroup, ID: el.UsergroupID}.canonicalLiteral())
+				sb.WriteByte(' ')
+			case *slack.RichTextSectionBroadcastElement:
+				sb.WriteString(mentionRef{Kind: mentionBroadcast, Range: el.Range}.canonicalLiteral())
 				sb.WriteByte(' ')
 			}
 		}

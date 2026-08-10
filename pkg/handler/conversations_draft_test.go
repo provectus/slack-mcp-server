@@ -912,6 +912,389 @@ func TestUnitDraftMessageNullBlocksDraftStillReviewable(t *testing.T) {
 	}
 }
 
+// stubMentionDirectory is a handler-level mentionResolver: it answers
+// verification and naming from fixed tables and records every lookup. It is the
+// seam these tests need because provider.ApiProvider.client is unexported, so a
+// fake Slack client cannot be injected from this package — the handler's
+// mentions field is where mention traffic is observable.
+//
+// A canonical literal absent from verify resolves clean, so tests only list the
+// references they want to fail.
+type stubMentionDirectory struct {
+	verify map[string]error  // canonical literal -> verification outcome
+	names  map[string]string // canonical literal -> display name
+
+	verifyCalls []string
+	nameCalls   []string
+}
+
+func (s *stubMentionDirectory) Verify(_ context.Context, ref mentionRef) error {
+	lit := ref.canonicalLiteral()
+	s.verifyCalls = append(s.verifyCalls, lit)
+	return s.verify[lit]
+}
+
+func (s *stubMentionDirectory) Name(_ context.Context, ref mentionRef) string {
+	lit := ref.canonicalLiteral()
+	s.nameCalls = append(s.nameCalls, lit)
+	return s.names[lit]
+}
+
+// TestUnitDraftMessageUnverifiableMentionNeverTouchesDraftsAPI is the AC 2.4
+// keystone. A reference that cannot be resolved refuses the write, and the
+// refusal must happen so early that the drafts API is never spoken to at all:
+// zero DraftsList, zero DraftsCreate, zero DraftsUpdate.
+//
+// The zero-call assertion is the enforcement point for the ordering contract in
+// ConversationsDraftMessageHandler. If anyone ever moves validateMentions below
+// the DraftsList call, this test fails loudly — which is the point: a refusal
+// that had already listed drafts would have read private content it had no
+// business reading, and a refusal below the update call would be able to damage
+// a draft the user wrote by hand.
+func TestUnitDraftMessageUnverifiableMentionNeverTouchesDraftsAPI(t *testing.T) {
+	cases := []struct {
+		name      string
+		listQueue [][]edge.Draft
+		overwrite bool
+	}{
+		{
+			// Nothing at the destination: the refusal must still not list.
+			name:      "no pre-existing draft",
+			listQueue: nil,
+		},
+		{
+			// A hand-written draft sits at the destination and the caller has
+			// even authorized overwriting it. The refusal must leave it
+			// completely untouched — not read, not listed, not modified.
+			name:      "pre-existing draft at the destination is untouched",
+			listQueue: [][]edge.Draft{{handWrittenDraft()}},
+			overwrite: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &draftsRecorder{createID: "Dr0NEW1", listQueue: tc.listQueue}
+			h := newDraftHandlerFixture(t, mock)
+			mentions := &stubMentionDirectory{verify: map[string]error{
+				"<@U0BOGUS1>": refNotFound("no such user"),
+			}}
+			h.mentions = mentions
+
+			res, err := callDraftMessage(t, h, map[string]any{
+				"channel_id":   "C0DEST",
+				"text":         "ping <@U0BOGUS1> about the release",
+				"content_type": "text/markdown",
+				"overwrite":    tc.overwrite,
+			})
+			require.Error(t, err, "an unresolvable reference must refuse the write")
+			assert.Nil(t, res)
+			assert.Contains(t, err.Error(), "<@U0BOGUS1>", "the error must name the offending reference")
+			assert.Contains(t, err.Error(), "nothing was written")
+			assert.Equal(t, []string{"<@U0BOGUS1>"}, mentions.verifyCalls)
+
+			assert.Zero(t, mock.listCalls,
+				"ORDERING CONTRACT: validation must run above DraftsList — a refusal never reads drafts")
+			assert.Empty(t, mock.createCalls, "a refusal must write nothing: zero creates")
+			assert.Empty(t, mock.updateCalls, "a refusal must write nothing: zero updates")
+
+			for _, listed := range tc.listQueue {
+				for _, d := range listed {
+					assert.Equal(t, handWrittenBlocks, string(d.Blocks),
+						"the draft already at the destination must survive the refusal byte-for-byte")
+				}
+			}
+		})
+	}
+}
+
+// TestUnitDraftMessageMentionErrorsDistinguishNotFoundFromUnverifiable (AC
+// 2.4): "does not exist" and "could not be verified" must be textually
+// distinct. They ask for different corrections — fix the ID versus retry later
+// — and an assistant told to "correct" a reference that is actually valid would
+// rewrite working content.
+func TestUnitDraftMessageMentionErrorsDistinguishNotFoundFromUnverifiable(t *testing.T) {
+	refuse := func(t *testing.T, verifyErr error) string {
+		t.Helper()
+		mock := &draftsRecorder{}
+		h := newDraftHandlerFixture(t, mock)
+		h.mentions = &stubMentionDirectory{verify: map[string]error{
+			"<!subteam^S0123ABC>": verifyErr,
+		}}
+
+		_, err := callDraftMessage(t, h, map[string]any{
+			"channel_id":   "C0DEST",
+			"text":         "heads up <!subteam^S0123ABC>",
+			"content_type": "text/markdown",
+		})
+		require.Error(t, err)
+		assert.Zero(t, mock.listCalls)
+		return err.Error()
+	}
+
+	notFound := refuse(t, refNotFound("no such user group"))
+	assert.Contains(t, notFound, "<!subteam^S0123ABC>")
+	assert.Contains(t, notFound, "does not exist in this workspace")
+	assert.Contains(t, notFound, "no such user group")
+	assert.Contains(t, notFound, "correct the reference and retry")
+	assert.Contains(t, notFound, "nothing was written")
+
+	unverifiable := refuse(t, refUnverifiable("usergroups.list failed: missing_scope — the token is missing the usergroups:read scope"))
+	assert.Contains(t, unverifiable, "<!subteam^S0123ABC>")
+	assert.Contains(t, unverifiable, "could not be verified")
+	assert.Contains(t, unverifiable, `"could not check", not "does not exist"`)
+	assert.Contains(t, unverifiable, "usergroups:read", "the could-not-verify form must name the missing scope")
+	assert.Contains(t, unverifiable, "nothing was written")
+
+	assert.NotEqual(t, notFound, unverifiable)
+	assert.NotContains(t, unverifiable, "does not exist in this workspace",
+		"could-not-verify must never read as a claim of absence")
+}
+
+// TestUnitDraftMessageMalformedPersonReferenceNeverTouchesDraftsAPI is the live
+// regression. The assistant pasted the DMChannelID column users_search returns
+// into a person reference — "bad ref check <@D0BJE66FPU5>" — and the draft was
+// written with the raw code in it as plain text. AC 2.4's first criterion says
+// a person reference whose code matches no real person must refuse the write,
+// and a D… code can match no person at all.
+//
+// It mirrors TestUnitDraftMessageUnverifiableMentionNeverTouchesDraftsAPI: the
+// refusal must sit above every drafts call, so a hand-written draft already at
+// the destination survives byte-for-byte.
+//
+// The mention directory is given no failing entries at all — every reference
+// resolves clean if asked. The refusal is a grammar fact, so it must land
+// without a single Verify call, let alone a network lookup.
+func TestUnitDraftMessageMalformedPersonReferenceNeverTouchesDraftsAPI(t *testing.T) {
+	cases := []struct {
+		name      string
+		text      string
+		wantRef   string
+		wantWhy   string
+		listQueue [][]edge.Draft
+		overwrite bool
+	}{
+		{
+			name:    "DM channel code in a person reference",
+			text:    "bad ref check <@D0BJE66FPU5>",
+			wantRef: "<@D0BJE66FPU5>",
+			wantWhy: "D0BJE66FPU5 is not a user ID (a D… code identifies a conversation)",
+		},
+		{
+			// Same defect, with a hand-written draft at the destination and
+			// overwrite authorized: the refusal must still touch nothing.
+			name:      "pre-existing draft at the destination is untouched",
+			text:      "bad ref check <@D0BJE66FPU5>",
+			wantRef:   "<@D0BJE66FPU5>",
+			wantWhy:   "D0BJE66FPU5 is not a user ID (a D… code identifies a conversation)",
+			listQueue: [][]edge.Draft{{handWrittenDraft()}},
+			overwrite: true,
+		},
+		{
+			name:    "user-group code in a channel reference",
+			text:    "see <#S123ABC> for details",
+			wantRef: "<#S123ABC>",
+			wantWhy: "S123ABC is not a conversation ID (an S… code identifies a user group)",
+		},
+		{
+			name:    "non-group code in a user-group reference",
+			text:    "cc <!subteam^X0AAAAA1> please",
+			wantRef: "<!subteam^X0AAAAA1>",
+			wantWhy: "X0AAAAA1 is not a user-group ID (user-group IDs start with S)",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mock := &draftsRecorder{createID: "Dr0NEW1", listQueue: tc.listQueue}
+			h := newDraftHandlerFixture(t, mock)
+			mentions := &stubMentionDirectory{}
+			h.mentions = mentions
+
+			res, err := callDraftMessage(t, h, map[string]any{
+				"channel_id":   "C0DEST",
+				"text":         tc.text,
+				"content_type": "text/markdown",
+				"overwrite":    tc.overwrite,
+			})
+			require.Error(t, err, "a malformed reference must refuse the write")
+			assert.Nil(t, res)
+			assert.Contains(t, err.Error(), tc.wantRef, "the error must name the offending reference")
+			assert.Contains(t, err.Error(), tc.wantWhy,
+				"the error must say why the code cannot be what the syntax claims, so the model can self-correct")
+			assert.Contains(t, err.Error(), "nothing was written")
+			assert.Contains(t, err.Error(), "correct the reference and retry")
+
+			assert.Empty(t, mentions.verifyCalls,
+				"a malformed reference is refused on the grammar alone — no workspace lookup")
+
+			assert.Zero(t, mock.listCalls,
+				"ORDERING CONTRACT: validation must run above DraftsList — a refusal never reads drafts")
+			assert.Empty(t, mock.createCalls, "a refusal must write nothing: zero creates")
+			assert.Empty(t, mock.updateCalls, "a refusal must write nothing: zero updates")
+
+			for _, listed := range tc.listQueue {
+				for _, d := range listed {
+					assert.Equal(t, handWrittenBlocks, string(d.Blocks),
+						"the draft already at the destination must survive the refusal byte-for-byte")
+				}
+			}
+		})
+	}
+}
+
+// The counterpart guard: correctly prefixed references still convert and
+// validate exactly as before, so widening the grammar cannot have made a valid
+// draft unwritable.
+func TestUnitDraftMessageWellFormedReferencesStillWrite(t *testing.T) {
+	written, err := json.Marshal([]slack.Block{plainRichTextBlock("ping")})
+	require.NoError(t, err)
+	created := edge.Draft{
+		ID:            "Dr0NEW1",
+		LastUpdatedTS: "1752000200.0000001",
+		Destinations:  []edge.DraftDestination{{ChannelID: "C0DEST"}},
+		Blocks:        written,
+	}
+
+	mock := &draftsRecorder{createID: "Dr0NEW1", listQueue: [][]edge.Draft{nil, {created}}}
+	h := newDraftHandlerFixture(t, mock)
+	mentions := &stubMentionDirectory{}
+	h.mentions = mentions
+
+	res, err := callDraftMessage(t, h, map[string]any{
+		"channel_id":   "C0DEST",
+		"text":         "ping <@U0AAAAA1> in <#C0AAAAA1>",
+		"content_type": "text/markdown",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, draftActionCreated, decodeDraftActionResult(t, res).Action)
+
+	assert.Equal(t, []string{"<@U0AAAAA1>", "<#C0AAAAA1>"}, mentions.verifyCalls,
+		"both well-formed references must still be verified against the workspace")
+	assert.Len(t, mock.createCalls, 1, "a valid draft must still be written")
+}
+
+// mentionBearingBlocks is what drafts.list returns for a draft that mentions a
+// person — including one who has since left the workspace. It is the restore
+// payload the application/json path exists to carry.
+const mentionBearingBlocks = `[{"type":"rich_text","block_id":"mEnT","elements":[{"type":"rich_text_section","elements":[{"type":"text","text":"thanks "},{"type":"user","user_id":"U0GONE99"}]}]}]`
+
+// TestUnitDraftMessageJSONContentSkipsMentionVerification: the verbatim restore
+// path is exempt from validation. These blocks came from Slack itself, so
+// validating them would make a human-authored draft mentioning a
+// since-deactivated colleague permanently unrestorable — breaking the
+// displaced.blocks_json restore promise.
+func TestUnitDraftMessageJSONContentSkipsMentionVerification(t *testing.T) {
+	normalized, err := normalizeDraftBlocks(json.RawMessage(mentionBearingBlocks))
+	require.NoError(t, err)
+
+	stored := handWrittenDraft()
+	stored.ID = "Dr0RESTORED1"
+	stored.Blocks = json.RawMessage(mentionBearingBlocks)
+	mock := &draftsRecorder{createID: "Dr0RESTORED1", listQueue: [][]edge.Draft{nil, {stored}}}
+	h := newDraftHandlerFixture(t, mock)
+	// Every reference would be refused if it were verified at all.
+	mentions := &stubMentionDirectory{verify: map[string]error{
+		"<@U0GONE99>": refNotFound("no such user"),
+	}}
+	h.mentions = mentions
+
+	res, err := callDraftMessage(t, h, map[string]any{
+		"channel_id":   "C0DEST",
+		"text":         string(normalized),
+		"content_type": "application/json",
+	})
+	require.NoError(t, err, "the restore path must not be gated by mention validation")
+
+	assert.Empty(t, mentions.verifyCalls, "application/json must never verify mentions")
+	require.Len(t, mock.createCalls, 1)
+	assert.Equal(t, string(normalized), string(mock.createCalls[0].blocks),
+		"the verbatim blocks must pass through byte-identical")
+
+	out := decodeDraftActionResult(t, res)
+	assert.Equal(t, string(normalized), string(out.Draft.BlocksJSON))
+}
+
+// TestUnitDraftMessagePlainTextSkipsMentionVerification: text/plain is exempt
+// too — literal means literal. The reference stays visible text, becomes no
+// element, notifies nobody, and is therefore nothing to verify.
+func TestUnitDraftMessagePlainTextSkipsMentionVerification(t *testing.T) {
+	written, err := json.Marshal([]slack.Block{plainRichTextBlock("literally <@U123ABC> here")})
+	require.NoError(t, err)
+	created := edge.Draft{
+		ID:            "Dr0NEW1",
+		LastUpdatedTS: "1752000200.0000001",
+		Destinations:  []edge.DraftDestination{{ChannelID: "C0DEST"}},
+		Blocks:        written,
+	}
+	mock := &draftsRecorder{createID: "Dr0NEW1", listQueue: [][]edge.Draft{nil, {created}}}
+	h := newDraftHandlerFixture(t, mock)
+	mentions := &stubMentionDirectory{verify: map[string]error{
+		"<@U123ABC>": refNotFound("no such user"),
+	}}
+	h.mentions = mentions
+
+	_, err = callDraftMessage(t, h, map[string]any{
+		"channel_id":   "C0DEST",
+		"text":         "literally <@U123ABC> here",
+		"content_type": "text/plain",
+	})
+	require.NoError(t, err, "text/plain must not be gated by mention validation")
+
+	assert.Empty(t, mentions.verifyCalls, "text/plain must never verify mentions")
+	require.Len(t, mock.createCalls, 1)
+	// Decoded rather than string-matched: encoding/json escapes "<" and ">",
+	// so a substring check would assert on the escaping, not on the content.
+	var stored []struct {
+		Elements []struct {
+			Elements []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			} `json:"elements"`
+		} `json:"elements"`
+	}
+	require.NoError(t, json.Unmarshal(mock.createCalls[0].blocks, &stored))
+	require.Len(t, stored, 1)
+	require.Len(t, stored[0].Elements, 1)
+	require.Len(t, stored[0].Elements[0].Elements, 1)
+	el := stored[0].Elements[0].Elements[0]
+	assert.Equal(t, "text", el.Type, "text/plain must produce no mention element")
+	assert.Equal(t, "literally <@U123ABC> here", el.Text,
+		"the reference must survive as literal text")
+}
+
+// TestUnitDraftMessageNoMentionsMakesNoDirectoryCalls (AC 2.4, last criterion):
+// a message with no references changes nothing about today's behaviour — no
+// verification, no naming, no provider traffic on the mention path at all.
+func TestUnitDraftMessageNoMentionsMakesNoDirectoryCalls(t *testing.T) {
+	rtb, err := markdownToRichTextBlock("just **ordinary** words, no references")
+	require.NoError(t, err)
+	written, err := json.Marshal([]slack.Block{rtb})
+	require.NoError(t, err)
+
+	created := edge.Draft{
+		ID:            "Dr0NEW1",
+		LastUpdatedTS: "1752000200.0000001",
+		Destinations:  []edge.DraftDestination{{ChannelID: "C0DEST"}},
+		Blocks:        written,
+	}
+	mock := &draftsRecorder{createID: "Dr0NEW1", listQueue: [][]edge.Draft{nil, {created}}}
+	h := newDraftHandlerFixture(t, mock)
+	mentions := &stubMentionDirectory{}
+	h.mentions = mentions
+
+	_, err = callDraftMessage(t, h, map[string]any{
+		"channel_id":   "C0DEST",
+		"text":         "just **ordinary** words, no references",
+		"content_type": "text/markdown",
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, mentions.verifyCalls, "a message with no references must verify nothing")
+	assert.Empty(t, mentions.nameCalls, "and must resolve no names on readback either")
+	require.Len(t, mock.createCalls, 1)
+}
+
 // TestUnitDraftMessageNonSessionTokenExplicitError covers the
 // defense-in-depth credential gate (spec §2.7, functional §2.5): an OAuth
 // token — which cannot reach the edge drafts API — gets the explicit
@@ -934,4 +1317,78 @@ func TestUnitDraftMessageNonSessionTokenExplicitError(t *testing.T) {
 	assert.Equal(t, 0, mock.listCalls, "credential gate must fire before any DraftsList")
 	assert.Empty(t, mock.createCalls)
 	assert.Empty(t, mock.updateCalls)
+}
+
+// indentedListItemMentionSource is the exact input that used to slip past both
+// halves of the mention machinery at once. The line scan measured the last
+// line's indent against column zero, called four columns an indented code
+// block and skipped it — while goldmark, which measures against the enclosing
+// "  - b" item's content column, rendered it as live list content. The result
+// was a raw "<@U0BOGUS1>" shipped as visible text inside a live rich_text_list
+// item (AC 2.2 broken), invisible to collectMentionRefs and therefore to the
+// AC 2.4 gate that exists to catch exactly that (AC 2.4 broken).
+const indentedListItemMentionSource = "- a\n  - b\n\n    please review <@U0BOGUS1> thanks\n"
+
+// TestUnitDraftMessageIndentedListItemReferenceNeverBypassesTheGate is the AC
+// 2.4 half of that regression: the reference must be verified, and an
+// unverifiable one must refuse the write without the drafts API being spoken to
+// at all — the same zero-call contract the keystone test pins.
+func TestUnitDraftMessageIndentedListItemReferenceNeverBypassesTheGate(t *testing.T) {
+	mock := &draftsRecorder{createID: "Dr0NEW1"}
+	h := newDraftHandlerFixture(t, mock)
+	mentions := &stubMentionDirectory{verify: map[string]error{
+		"<@U0BOGUS1>": refNotFound("no such user"),
+	}}
+	h.mentions = mentions
+
+	res, err := callDraftMessage(t, h, map[string]any{
+		"channel_id":   "C0DEST",
+		"text":         indentedListItemMentionSource,
+		"content_type": "text/markdown",
+	})
+	require.Error(t, err, "a reference in indented list content must still be gated")
+	assert.Nil(t, res)
+	assert.Contains(t, err.Error(), "<@U0BOGUS1>", "the error must name the offending reference")
+	assert.Contains(t, err.Error(), "nothing was written")
+	assert.Equal(t, []string{"<@U0BOGUS1>"}, mentions.verifyCalls,
+		"the reference must reach the verifier, whatever route left it in the text")
+
+	assert.Zero(t, mock.listCalls,
+		"ORDERING CONTRACT: a refusal never reads drafts")
+	assert.Empty(t, mock.createCalls, "a refusal must write nothing: zero creates")
+	assert.Empty(t, mock.updateCalls, "a refusal must write nothing: zero updates")
+}
+
+// TestUnitDraftMessageIndentedListItemReferenceBecomesLiveMention is the AC 2.2
+// half: once verified, the same reference must reach the draft as a real user
+// element rather than as the raw code the reader would otherwise see.
+func TestUnitDraftMessageIndentedListItemReferenceBecomesLiveMention(t *testing.T) {
+	written, err := json.Marshal([]slack.Block{plainRichTextBlock("placeholder")})
+	require.NoError(t, err)
+	created := edge.Draft{
+		ID:            "Dr0NEW1",
+		LastUpdatedTS: "1752000200.0000001",
+		Destinations:  []edge.DraftDestination{{ChannelID: "C0DEST"}},
+		Blocks:        written,
+	}
+
+	mock := &draftsRecorder{createID: "Dr0NEW1", listQueue: [][]edge.Draft{nil, {created}}}
+	h := newDraftHandlerFixture(t, mock)
+	h.mentions = &stubMentionDirectory{} // no entry => verifies clean
+
+	res, err := callDraftMessage(t, h, map[string]any{
+		"channel_id":   "C0DEST",
+		"text":         indentedListItemMentionSource,
+		"content_type": "text/markdown",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	require.Len(t, mock.createCalls, 1)
+
+	blocks := string(mock.createCalls[0].blocks)
+	assert.Contains(t, blocks, `"type":"user"`,
+		"the reference must convert to a live user element, not ship as raw text")
+	assert.Contains(t, blocks, `"user_id":"U0BOGUS1"`)
+	assert.NotContains(t, blocks, `<@U0BOGUS1>`,
+		"no raw angle-bracket code may survive into the draft")
 }
