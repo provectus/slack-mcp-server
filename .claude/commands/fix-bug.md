@@ -61,6 +61,8 @@ Start with a cheap preflight on the fast model tier (per §8): is this bug **alr
 
 Per §2–§3: confirm `context/` is reachable (in-repo directory); warn on a dirty working tree (uncommitted AWOS artifacts left by `/awos:flow` are an expected cause, not a blocker); `git fetch fork master`; create the branch from `fork/master` using the `fix/<kebab-slug>` convention (e.g. `fix/channels-refresh-counts-only`). Store it as `BRANCH`. No submodules; main checkout (no worktrees).
 
+Then, before any other work, **re-check the Remote Gates facts** in §4 of `context/product/delivery-flow.md` against a recent PR — `gh pr checks <recent-PR> --repo provectus/slack-mcp-server` — and correct §4, this command, and `/implement-feature` if they disagree. This check lives here, not at the CI stage, on purpose: gate drift is only *visible* once a PR is open, which is exactly when the Self-Improvement Loop defers flow fixes to the next run. That deferral lost the same correction three runs in a row (§10). Verifying it while the branch is fresh is what makes the correction applicable.
+
 <!-- /awos:flow:stage -->
 
 <!-- awos:flow:stage=diagnose -->
@@ -164,9 +166,9 @@ From here the PR is open — **do not append to the tracked flow-log** (Context 
   gh pr create --repo provectus/slack-mcp-server --base master --head {BRANCH} --title "<conventional-commit title>" --body "<symptom, root cause, fix; Closes #<issue> if applicable>"
   ```
 
-- **Wait on CI, fixing failures in a loop.** Checks: `Unit Tests` (`make test`) and `Security (Trivy)`. Watch with the `Monitor` tool — a poll loop over `gh pr checks {PR} --repo provectus/slack-mcp-server` emitting each check's terminal result (pass/fail/cancel), timeout ~10 minutes, poll 30s. On a failure, **reuse the `gha-diagnosis` skill** to diagnose from the failed job's logs, apply the fix (delegated to a specialist subagent), push, re-check until green. On a poll-window expiry, auto-relaunch the monitor once; past ~20 minutes unsettled, ask the user (§4).
+- **Wait on CI, fixing failures in a loop.** Eight checks run: `unit-tests`, `Trivy filesystem scan`, `Analyze (go)`, `Analyze (actions)`, `CodeQL`, `scripts-tests (ubuntu-latest)`, `scripts-tests (macos-latest)`, and `CodeRabbit` (usually the last to settle). Watch with the `Monitor` tool — a poll loop over `gh pr checks {PR} --repo provectus/slack-mcp-server` emitting each check's terminal result (pass/fail/cancel), timeout ~10 minutes, poll 30s. On a failure, **reuse the `gha-diagnosis` skill** to diagnose from the failed job's logs, apply the fix (delegated to a specialist subagent), push, re-check until green. On a poll-window expiry, auto-relaunch the monitor once; past ~20 minutes unsettled, ask the user (§4).
 
-No automatic reviewer bot and no second human reviewer — CI is the only remote gate.
+Opening the PR also auto-requests a **CodeRabbit** review. It is advisory, not a required status check — its in-progress state drives `mergeStateStatus=BLOCKED` even though the branch is unprotected, and a maintainer can still merge. It may also report "Review rate limited" and skip a push, so its verdict is not dependable evidence either way. When it leaves findings, address them via the `pr-comments-address` skill. There is no second human reviewer (§4).
 
 <!-- /awos:flow:stage -->
 
