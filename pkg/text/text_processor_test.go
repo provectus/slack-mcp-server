@@ -918,3 +918,68 @@ func TestFilesToTextProcessTextPipeline(t *testing.T) {
 		})
 	}
 }
+
+// @layer: unit
+// @spec: falsey-env-registers-tool
+// @regression
+func TestUnitIsFalsey(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "false", value: "false", want: true},
+		{name: "0", value: "0", want: true},
+		{name: "no", value: "no", want: true},
+		{name: "off", value: "off", want: true},
+		{name: "uppercase FALSE", value: "FALSE", want: true},
+		{name: "mixed case Off", value: "Off", want: true},
+		{name: "padded false", value: "  false  ", want: true},
+		{name: "padded 0", value: " 0 ", want: true},
+		{name: "whitespace only is not an explicit falsey spelling", value: "   ", want: false},
+		{name: "empty string is not falsey", value: "", want: false},
+		{name: "true is not falsey", value: "true", want: false},
+		{name: "unrelated word", value: "banana", want: false},
+		{name: "channel id is not falsey", value: "C123", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsFalsey(tt.value); got != tt.want {
+				t.Errorf("IsFalsey(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// @layer: unit
+// @spec: falsey-env-registers-tool
+// @regression
+func TestUnitIsTruthy(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "true", value: "true", want: true},
+		{name: "1", value: "1", want: true},
+		{name: "yes", value: "yes", want: true},
+		{name: "uppercase TRUE", value: "TRUE", want: true},
+		{name: "mixed case Yes", value: "Yes", want: true},
+		{name: "padded true", value: " true ", want: true},
+		{name: "padded 1", value: " 1 ", want: true},
+		{name: "whitespace only is not truthy", value: "   ", want: false},
+		{name: "empty string is not truthy", value: "", want: false},
+		{name: "false is not truthy", value: "false", want: false},
+		{name: "unrelated word", value: "banana", want: false},
+		{name: "channel id is not truthy", value: "C123", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsTruthy(tt.value); got != tt.want {
+				t.Errorf("IsTruthy(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}

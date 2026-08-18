@@ -39,19 +39,7 @@ func main() {
 		os.Exit(0)
 	}
 
-	if enabledToolsFlag == "" {
-		enabledToolsFlag = os.Getenv("SLACK_MCP_ENABLED_TOOLS")
-	}
-
-	var enabledTools []string
-	if enabledToolsFlag != "" {
-		for _, tool := range strings.Split(enabledToolsFlag, ",") {
-			tool = strings.TrimSpace(tool)
-			if tool != "" {
-				enabledTools = append(enabledTools, tool)
-			}
-		}
-	}
+	enabledTools := resolveEnabledTools(enabledToolsFlag)
 
 	logger, err := newLogger(transport)
 	if err != nil {
@@ -250,6 +238,27 @@ func newChannelsWatcher(p *provider.ApiProvider, once *sync.Once, logger *zap.Lo
 			})
 		}
 	}
+}
+
+// resolveEnabledTools resolves the enabled-tools allowlist from the CLI flag,
+// falling back to the SLACK_MCP_ENABLED_TOOLS environment variable, and
+// exports the resolved value back to the environment so handler-side gates
+// that read SLACK_MCP_ENABLED_TOOLS see the same allowlist regardless of
+// which mechanism the operator used. Returns the parsed tool names.
+func resolveEnabledTools(flagValue string) []string {
+	if flagValue == "" {
+		flagValue = os.Getenv("SLACK_MCP_ENABLED_TOOLS")
+	}
+	os.Setenv("SLACK_MCP_ENABLED_TOOLS", flagValue)
+
+	var enabledTools []string
+	for _, tool := range strings.Split(flagValue, ",") {
+		tool = strings.TrimSpace(tool)
+		if tool != "" {
+			enabledTools = append(enabledTools, tool)
+		}
+	}
+	return enabledTools
 }
 
 func validateToolConfig(config string) error {
